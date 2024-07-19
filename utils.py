@@ -40,10 +40,11 @@ class TestArea:
         self.dominant_tissue = dominant_tissue
 
 class TestItem:
-    def __init__(self, adata, ground_truth, test_area):
+    def __init__(self, adata, ground_truth, test_area, meta_data):
         self.adata = adata
         self.ground_truth = ground_truth
         self.test_area = test_area
+        self.meta_data = meta_data
 
 def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", \
                 hole_size: int = 200, num_holes: int = 2, dominance_threshold: float = 0.9):
@@ -55,8 +56,9 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
     if platform == "MERFISH":
         if dataset == "MouseBrainAging":
             adata = ad.read_h5ad(fold_dir + platform + "/" + dataset + "/2330673b-b5dc-4690-bbbe-8f409362df31.h5ad")
-            
             obs = adata.obs
+            for field in ['min_x', 'max_x', 'min_y', 'max_y', 'center_x', 'center_y']:
+                obs[field] = obs[field].astype(float)
             donor_id_list = list(obs['donor_id'].unique())
             all_test_items = []
 
@@ -72,13 +74,6 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
                     slice_x = donor_x[donor_obs['slice'] == slice_id]
                     
                     slice_obs_df = pd.DataFrame(slice_obs)
-                    slice_obs_df['min_x'] = slice_obs_df['min_x'].astype(float)
-                    slice_obs_df['max_x'] = slice_obs_df['max_x'].astype(float)
-                    slice_obs_df['min_y'] = slice_obs_df['min_y'].astype(float)
-                    slice_obs_df['max_y'] = slice_obs_df['max_y'].astype(float)
-                    slice_obs_df['center_x'] = slice_obs_df['center_x'].astype(float)
-                    slice_obs_df['center_y'] = slice_obs_df['center_y'].astype(float)
-
                     slice_obs_df['fov'] = slice_obs_df['fov'].cat.remove_unused_categories()
                     
                     fov_boundaries = slice_obs_df.groupby('fov').agg(
@@ -129,15 +124,24 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
                                     hole_max_y=hole_max_y,
                                     dominant_tissue=dominant_tissue
                                 )
-
+                                
+                                meta_data = {}
+                                meta_data['platform'] = "MERFISH"
+                                meta_data['dataset'] = "MouseBrainAging"
+                                meta_data['donor_id'] = donor_id
+                                meta_data['slice_id'] = slice_id
+                                meta_data['test_region_id'] = holes_found
+                                
                                 test_item = TestItem(
                                     adata=adata_copy,
                                     ground_truth=ground_truth,
-                                    test_area=test_area
+                                    test_area=test_area,
+                                    meta_data=meta_data
                                 )
 
                                 all_test_items.append(test_item)
                                 holes_found += 1
+                                
                     break
                 break
 
@@ -150,12 +154,8 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
 
 def visualize_test_region(slice_obs_df, test_area, title='', new_coords=None):
     slice_obs_df['fov'] = slice_obs_df['fov'].astype(int)
-    slice_obs_df['min_x'] = slice_obs_df['min_x'].astype(float)
-    slice_obs_df['max_x'] = slice_obs_df['max_x'].astype(float)
-    slice_obs_df['min_y'] = slice_obs_df['min_y'].astype(float)
-    slice_obs_df['max_y'] = slice_obs_df['max_y'].astype(float)
-    slice_obs_df['center_x'] = slice_obs_df['center_x'].astype(float)
-    slice_obs_df['center_y'] = slice_obs_df['center_y'].astype(float)
+    for field in ['min_x', 'max_x', 'min_y', 'max_y', 'center_x', 'center_y']:
+        slice_obs_df[field] = slice_obs_df[field].astype(float)
 
     cmap = plt.get_cmap('viridis')
     norm = Normalize(vmin=slice_obs_df['fov'].min(), vmax=slice_obs_df['fov'].max())
@@ -218,6 +218,82 @@ def visualize_test_region(slice_obs_df, test_area, title='', new_coords=None):
     plt.suptitle(title)
     plt.tight_layout()
     plt.show()
+
+def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBrainAging",
+                              dominance_threshold: float = 0.9, region_size: float = 200,
+                              num_samples_per_slice: int = 10, minimum_cell: int = 40):
+    seed_everything()
+
+    fold_dir = "/extra/zhanglab0/SpatialTranscriptomicsData/"
+    
+    if platform == "MERFISH" and dataset == "MouseBrainAging":
+        adata = ad.read_h5ad(fold_dir + platform + "/" + dataset + "/2330673b-b5dc-4690-bbbe-8f409362df31.h5ad")
+        obs = adata.obs
+        for field in ['min_x', 'max_x', 'min_y', 'max_y', 'center_x', 'center_y']:
+            obs[field] = obs[field].astype(float)
+        donor_id_list = list(obs['donor_id'].unique())
+        training_samples = []
+
+        for donor_id in donor_id_list:
+            donor_obs = obs[obs['donor_id'] == donor_id]
+            slice_list = donor_obs['slice'].unique()
+
+            for slice_id in slice_list:
+                slice_obs = donor_obs[donor_obs['slice'] == slice_id]
+                slice_x = adata[obs['slice'] == slice_id]
+
+                num_samples_generated = 0
+                while num_samples_generated < num_samples_per_slice:
+                    try:
+                        center_x = np.random.uniform(min(slice_obs['min_x']), max(slice_obs['max_x']))
+                        center_y = np.random.uniform(min(slice_obs['min_y']), max(slice_obs['max_y']))
+
+                        hole_min_x = max(min(slice_obs['min_x']), center_x - region_size / 2)
+                        hole_max_x = min(max(slice_obs['max_x']), center_x + region_size / 2)
+                        hole_min_y = max(min(slice_obs['min_y']), center_y - region_size / 2)
+                        hole_max_y = min(max(slice_obs['max_y']), center_y + region_size / 2)
+
+                        selected_index = slice_obs[
+                            (slice_obs['center_x'] >= hole_min_x) &
+                            (slice_obs['center_x'] <= hole_max_x) &
+                            (slice_obs['center_y'] >= hole_min_y) &
+                            (slice_obs['center_y'] <= hole_max_y)
+                        ].index
+                        
+                        if selected_index.shape[0] < minimum_cell:
+                            continue
+
+                        slice_obs.loc[selected_index, 'normalized_x'] = (slice_obs.loc[selected_index, 'center_x'] - hole_min_x) / (hole_max_x - hole_min_x)
+                        slice_obs.loc[selected_index, 'normalized_y'] = (slice_obs.loc[selected_index, 'center_y'] - hole_min_y) / (hole_max_y - hole_min_y)
+
+                        dominant_tissue = slice_obs.loc[selected_index, 'tissue'].value_counts().idxmax()
+                        dominant_ratio = slice_obs.loc[selected_index, 'tissue'].value_counts(normalize=True)[dominant_tissue]
+
+                        if dominant_ratio < dominance_threshold:
+                            continue
+
+                        training_samples.append({
+                            'normalized_positions': slice_obs.loc[selected_index, ['normalized_x', 'normalized_y']].values,
+                            'gene_expressions': slice_x[slice_obs.loc[selected_index].index, :].X,
+                            'metadata': {
+                                'platform': platform,
+                                'dataset': dataset,
+                                'donor_id': donor_id,
+                                'slice_id': slice_id,
+                                'dominant_tissue': dominant_tissue,
+                                'tissue_percentage': dominant_ratio
+                            }
+                        })
+                        
+                        num_samples_generated += 1
+
+                    except Exception as e:
+                        print(f"Failed to process region due to error: {e}")
+                        
+                break
+            break
+
+    return training_samples
 
 if __name__ == "__main__":
     
