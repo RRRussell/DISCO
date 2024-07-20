@@ -47,7 +47,7 @@ class TestItem:
         self.meta_data = meta_data
 
 def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", \
-                hole_size: int = 200, num_holes: int = 2, dominance_threshold: float = 0.9):
+                hole_size: int = 250, num_holes: int = 2, dominance_threshold: float = 0.9, num_cells: int = 50):
     
     seed_everything()
     
@@ -89,8 +89,14 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
                     holes_found = 0
                     while holes_found < num_holes:
                         fov = fov_boundaries.sample(1).iloc[0]
-                        rand_center_x = fov['center_x'] + random.uniform(-hole_size / 4, hole_size / 4)
-                        rand_center_y = fov['center_y'] + random.uniform(-hole_size / 4, hole_size / 4)
+                        if fov['center_x'] < 0:
+                            rand_center_x = fov['center_x'] + random.uniform(0, hole_size / 2)
+                        else:
+                            rand_center_x = fov['center_x'] - random.uniform(0, hole_size / 2)
+                        if fov['center_y'] < 0:
+                            rand_center_y = fov['center_y'] + random.uniform(0, hole_size / 2)
+                        else:
+                            rand_center_y = fov['center_y'] - random.uniform(0, hole_size / 2)
 
                         hole_min_x = max(rand_center_x - hole_size / 2, fov['min_x'])
                         hole_max_x = min(rand_center_x + hole_size / 2, fov['max_x'])
@@ -103,19 +109,17 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
                             (slice_obs_df['center_y'] >= hole_min_y) & 
                             (slice_obs_df['center_y'] <= hole_max_y)
                         ]
-
-                        if not hole_cells.empty:
-                            dominant_tissue = hole_cells['tissue'].value_counts().idxmax()
-                            dominant_tissue_ratio = hole_cells['tissue'].value_counts(normalize=True).loc[dominant_tissue]
-                            tissue_percentages = hole_cells['tissue'].value_counts(normalize=True).to_dict()
+                        
+                        if len(hole_cells) >= num_cells:
+                            sampled_cells = hole_cells.sample(n=num_cells, replace=False)
+                            dominant_tissue = sampled_cells['tissue'].value_counts().idxmax()
+                            if dominant_tissue in ['brain ventricle', 'olfactory region']:
+                                continue
+                            dominant_tissue_ratio = sampled_cells['tissue'].value_counts(normalize=True)[dominant_tissue]
 
                             if dominant_tissue_ratio > dominance_threshold:
-                                hole_cells_index = hole_cells.index
-                                gene_expression = slice_x[slice_obs.index.isin(hole_cells_index)].X
-
-                                adata_copy = slice_x[~slice_obs.index.isin(hole_cells_index)]
-
-                                ground_truth = GroundTruth(hole_cells=hole_cells, gene_expression=gene_expression, tissue_percentages=tissue_percentages)
+                                gene_expression = slice_x[sampled_cells.index].X
+                                ground_truth = GroundTruth(hole_cells=sampled_cells, gene_expression=gene_expression, tissue_percentages=sampled_cells['tissue'].value_counts(normalize=True).to_dict())
 
                                 test_area = TestArea(
                                     hole_min_x=hole_min_x,
@@ -125,15 +129,16 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
                                     dominant_tissue=dominant_tissue
                                 )
                                 
-                                meta_data = {}
-                                meta_data['platform'] = "MERFISH"
-                                meta_data['dataset'] = "MouseBrainAging"
-                                meta_data['donor_id'] = donor_id
-                                meta_data['slice_id'] = slice_id
-                                meta_data['test_region_id'] = holes_found
+                                meta_data = {
+                                    'platform': platform,
+                                    'dataset': dataset,
+                                    'donor_id': donor_id,
+                                    'slice_id': slice_id,
+                                    'test_region_id': holes_found
+                                }
                                 
                                 test_item = TestItem(
-                                    adata=adata_copy,
+                                    adata=slice_x[~slice_x.obs.index.isin(hole_cells.index)],
                                     ground_truth=ground_truth,
                                     test_area=test_area,
                                     meta_data=meta_data
@@ -141,9 +146,8 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
 
                                 all_test_items.append(test_item)
                                 holes_found += 1
-                                
-                    break
-                break
+                #     break
+                # break
 
             return all_test_items
         
@@ -220,8 +224,8 @@ def visualize_test_region(slice_obs_df, test_area, title='', new_coords=None):
     plt.show()
 
 def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBrainAging",
-                              dominance_threshold: float = 0.9, region_size: float = 200,
-                              num_samples_per_slice: int = 10, minimum_cell: int = 40):
+                              dominance_threshold: float = 0.9, region_size: float = 250,
+                              num_samples_per_slice: int = 10, num_cells: int = 50):
     seed_everything()
 
     fold_dir = "/extra/zhanglab0/SpatialTranscriptomicsData/"
@@ -252,6 +256,9 @@ def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBr
                         hole_max_x = min(max(slice_obs['max_x']), center_x + region_size / 2)
                         hole_min_y = max(min(slice_obs['min_y']), center_y - region_size / 2)
                         hole_max_y = min(max(slice_obs['max_y']), center_y + region_size / 2)
+                        
+                        if hole_max_x - hole_min_x != region_size or hole_max_y - hole_min_y != region_size:
+                            continue
 
                         selected_index = slice_obs[
                             (slice_obs['center_x'] >= hole_min_x) &
@@ -260,13 +267,19 @@ def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBr
                             (slice_obs['center_y'] <= hole_max_y)
                         ].index
                         
-                        if selected_index.shape[0] < minimum_cell:
+                        # Check if there are at least the minimum required number of cells
+                        if len(selected_index) >= num_cells:
+                            # Randomly select num_cells cells without replacement
+                            selected_index = np.random.choice(selected_index, size=num_cells, replace=False)
+                        else:
                             continue
 
                         slice_obs.loc[selected_index, 'normalized_x'] = (slice_obs.loc[selected_index, 'center_x'] - hole_min_x) / (hole_max_x - hole_min_x)
                         slice_obs.loc[selected_index, 'normalized_y'] = (slice_obs.loc[selected_index, 'center_y'] - hole_min_y) / (hole_max_y - hole_min_y)
 
                         dominant_tissue = slice_obs.loc[selected_index, 'tissue'].value_counts().idxmax()
+                        if dominant_tissue in ['brain ventricle', 'olfactory region']:
+                            continue
                         dominant_ratio = slice_obs.loc[selected_index, 'tissue'].value_counts(normalize=True)[dominant_tissue]
 
                         if dominant_ratio < dominance_threshold:
