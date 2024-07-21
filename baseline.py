@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from sklearn.cluster import KMeans
 
 class Baseline:
     def __init__(self, adata, test_area, num_cells=50):
@@ -99,3 +100,118 @@ class TissueSpecificRandomRegionBaseline(Baseline):
         new_coords['center_y'] = new_coords['center_y'] - new_coords['center_y'].mean() + (self.test_area.hole_min_y + self.test_area.hole_max_y) / 2
         
         return new_coords.values, filled_gene_expressions
+    
+
+class KNNClusteringBaseline(Baseline): 
+    def fill_region(self):
+        slice_obs_df = pd.DataFrame(self.adata.obs)
+        slice_obs_df['center_x'] = slice_obs_df['center_x'].astype(float)
+        slice_obs_df['center_y'] = slice_obs_df['center_y'].astype(float)
+        
+        # get dimensions of the hole
+        min_x = self.test_area.hole_min_x
+        max_x = self.test_area.hole_max_x
+        min_y = self.test_area.hole_min_y
+        max_y = self.test_area.hole_max_y
+        x_len = max_x - min_x
+        y_len = max_y - min_y
+        
+        # find the 8 neighboring patches
+        neighbors = []
+        # left
+        neighbors.append({
+            'min_x': min_x - x_len,
+            'max_x': min_x,
+            'min_y': min_y,
+            'max_y': max_y
+        })
+        # right
+        neighbors.append({
+            'min_x': max_x,
+            'max_x': max_x + x_len,
+            'min_y': min_y,
+            'max_y': max_y
+        })
+        # bottom
+        neighbors.append({
+            'min_x': min_x,
+            'max_x': max_x,
+            'min_y': min_y - y_len,
+            'max_y': min_y
+        })
+        # top
+        neighbors.append({
+            'min_x': min_x,
+            'max_x': max_x,
+            'min_y': max_y,
+            'max_y': max_y + y_len
+        })
+        # bottom-left
+        neighbors.append({
+            'min_x': min_x - x_len,
+            'max_x': min_x,
+            'min_y': min_y - y_len,
+            'max_y': min_y
+        })
+        # bottom-right
+        neighbors.append({
+            'min_x': max_x,
+            'max_x': max_x + x_len,
+            'min_y': min_y - y_len,
+            'max_y': min_y
+        })
+        # top-left
+        neighbors.append({
+            'min_x': min_x - x_len,
+            'max_x': min_x,
+            'min_y': max_y,
+            'max_y': max_y + y_len
+        })
+        # top-right
+        neighbors.append({
+            'min_x': max_x,
+            'max_x': max_x + x_len,
+            'min_y': max_y,
+            'max_y': max_y + y_len
+        })
+
+        # find cells in the neighboring regions
+        cells_obs = pd.DataFrame()
+        cells_x = None
+        for region in neighbors: 
+            mask = (
+                (slice_obs_df['center_x'] >= region['min_x']) & 
+                (slice_obs_df['center_x'] < region['max_x']) & 
+                (slice_obs_df['center_y'] >= region['min_y']) & 
+                (slice_obs_df['center_y'] < region['max_y'])
+            )
+            current_obs = slice_obs_df[mask].copy()
+            current_obs['relative_x'] = current_obs['center_x'] - region['min_x']
+            current_obs['relative_y'] = current_obs['center_y'] - region['min_y']
+            cells_obs = pd.concat([cells_obs, current_obs])
+            if cells_x is None: 
+                cells_x = self.adata.X[mask]
+            else: 
+                cells_x = np.vstack((cells_x, self.adata.X[mask]))
+            
+        if cells_obs.shape[0] < self.num_cells: 
+            raise ValueError("Not enough cells of the neighboring area to perform KNN")
+        
+        # use K Means clustering to complete the missing region
+        cells_obs = cells_obs.reset_index()
+        kmeans = KMeans(n_clusters=self.num_cells, random_state=2024)
+        cells_obs['cluster'] = kmeans.fit_predict(cells_obs[['relative_x', 'relative_y']])
+        # find the mean coordinates for each predicted cell
+        mean_coordinates = cells_obs.groupby('cluster')[['relative_x', 'relative_y']].mean().reset_index()
+        # find the gene expressions for each predicted cell
+        cells_x_df = pd.DataFrame(cells_x)
+        cells_x_df['cluster'] = cells_obs['cluster']
+        mean_expression = cells_x_df.groupby('cluster').mean().reset_index()
+        
+        mean_coordinates = mean_coordinates.drop(columns=['cluster'])
+        mean_coordinates['relative_x'] = mean_coordinates['relative_x'] + min_x
+        mean_coordinates['relative_y'] = mean_coordinates['relative_y'] + min_y
+        mean_coordinates = mean_coordinates.to_numpy()
+        mean_expression = mean_expression.drop(columns=['cluster']).to_numpy()
+
+        return mean_coordinates, mean_expression
