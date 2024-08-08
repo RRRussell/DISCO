@@ -38,6 +38,7 @@ def create_args():
     parser.add_argument('--end_lr', type=float, default=1e-4)
     parser.add_argument('--sched_start_epoch', type=int, default=200*THOUSAND)
     parser.add_argument('--sched_end_epoch', type=int, default=400*THOUSAND)
+    parser.add_argument('--train_epochs', type=int, default=100)
 
     # Training
     # parser.add_argument('--seed', type=int, default=2020)

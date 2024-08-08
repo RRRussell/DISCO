@@ -1,6 +1,27 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+class GroundTruth:
+    def __init__(self, hole_cells, gene_expression, tissue_percentages):
+        self.hole_cells = hole_cells
+        self.gene_expression = gene_expression
+        self.tissue_percentages = tissue_percentages
+
+class TestArea:
+    def __init__(self, hole_min_x, hole_max_x, hole_min_y, hole_max_y, dominant_tissue):
+        self.hole_min_x = hole_min_x
+        self.hole_max_x = hole_max_x
+        self.hole_min_y = hole_min_y
+        self.hole_max_y = hole_max_y
+        self.dominant_tissue = dominant_tissue
+
+class TestItem:
+    def __init__(self, adata, ground_truth, test_area, meta_data):
+        self.adata = adata
+        self.ground_truth = ground_truth
+        self.test_area = test_area
+        self.meta_data = meta_data
+        
 class STDataset(Dataset):
     def __init__(self, training_samples):
         """

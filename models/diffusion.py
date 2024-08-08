@@ -57,10 +57,10 @@ class PointwiseNet(Module):
         self.residual = residual
         self.layers = ModuleList([
             ConcatSquashLinear(point_dim, 128, context_dim+3),
-            ConcatSquashLinear(128, 256, context_dim+3),
-            ConcatSquashLinear(256, 512, context_dim+3),
-            ConcatSquashLinear(512, 256, context_dim+3),
-            ConcatSquashLinear(256, 128, context_dim+3),
+            # ConcatSquashLinear(128, 256, context_dim+3),
+            # ConcatSquashLinear(256, 512, context_dim+3),
+            # ConcatSquashLinear(512, 256, context_dim+3),
+            # ConcatSquashLinear(256, 128, context_dim+3),
             ConcatSquashLinear(128, point_dim, context_dim+3)
         ])
 

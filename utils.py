@@ -12,6 +12,8 @@ from matplotlib.colors import Normalize
 
 import torch
 
+from dataset import GroundTruth, TestArea, TestItem
+
 def seed_everything(seed=2024):
     random.seed(seed)    # Python random module
     np.random.seed(seed) # Numpy module
@@ -24,27 +26,6 @@ def seed_everything(seed=2024):
     torch.backends.cudnn.benchmark = False
     
     print(f'Seeding all randomness with seed={seed}')
-
-class GroundTruth:
-    def __init__(self, hole_cells, gene_expression, tissue_percentages):
-        self.hole_cells = hole_cells
-        self.gene_expression = gene_expression
-        self.tissue_percentages = tissue_percentages
-
-class TestArea:
-    def __init__(self, hole_min_x, hole_max_x, hole_min_y, hole_max_y, dominant_tissue):
-        self.hole_min_x = hole_min_x
-        self.hole_max_x = hole_max_x
-        self.hole_min_y = hole_min_y
-        self.hole_max_y = hole_max_y
-        self.dominant_tissue = dominant_tissue
-
-class TestItem:
-    def __init__(self, adata, ground_truth, test_area, meta_data):
-        self.adata = adata
-        self.ground_truth = ground_truth
-        self.test_area = test_area
-        self.meta_data = meta_data
 
 def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", \
                 hole_size: int = 250, num_holes: int = 2, dominance_threshold: float = 0.9, num_cells: int = 50):
@@ -239,11 +220,11 @@ def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBr
         training_samples = []
 
         for donor_id in donor_id_list:
-            donor_obs = obs[obs['donor_id'] == donor_id]
+            donor_obs = obs[obs['donor_id'] == donor_id].copy()
             slice_list = donor_obs['slice'].unique()
 
             for slice_id in slice_list:
-                slice_obs = donor_obs[donor_obs['slice'] == slice_id]
+                slice_obs = donor_obs[donor_obs['slice'] == slice_id].copy()
                 slice_x = adata[obs['slice'] == slice_id]
 
                 num_samples_generated = 0
@@ -303,10 +284,39 @@ def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBr
                     except Exception as e:
                         print(f"Failed to process region due to error: {e}")
                         
-                break
-            break
+            #     break
+            # break
 
     return training_samples
+
+def filter_training_sample_by_tissue(training_samples, tissue_name):
+    filtered_samples = [sample for sample in training_samples if sample['metadata']['dominant_tissue'] == tissue_name]
+    return filtered_samples
+
+def count_dominant_tissue(data):
+    tissue_count = {}
+    
+    for sample in data:
+        tissue = sample['metadata']['dominant_tissue']
+        if tissue in tissue_count:
+            tissue_count[tissue] += 1
+        else:
+            tissue_count[tissue] = 1
+            
+    return tissue_count
+
+def plot_tissue_distribution(tissue_count):
+    tissues = list(tissue_count.keys())
+    counts = list(tissue_count.values())
+    
+    plt.figure(figsize=(5, 3))
+    plt.bar(tissues, counts, color='skyblue')
+    plt.xlabel('Tissue Type')
+    plt.ylabel('Count')
+    plt.title('Distribution of Dominant Tissue')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    plt.show()
 
 if __name__ == "__main__":
     
