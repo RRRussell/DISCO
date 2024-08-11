@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.spatial import distance, distance_matrix
 from scipy.optimize import linear_sum_assignment
-from sklearn.metrics import mean_squared_error, f1_score
+from sklearn.metrics import mean_squared_error
 from sklearn.metrics.pairwise import cosine_similarity
 
 class Evaluator:
@@ -22,16 +22,22 @@ class Evaluator:
 
     @staticmethod
     def evaluate_expression(true_coords, true_gene_expressions, pred_coords, pred_gene_expressions):
+        # Compute the distance matrix between predicted and true coordinates
         dist_matrix = distance_matrix(pred_coords, true_coords)
+        # Find the index of the closest true point for each predicted point
         closest_indices = np.argmin(dist_matrix, axis=1)
+        # Get the closest true gene expressions
         closest_true_gene_expressions = true_gene_expressions[closest_indices]
+        # Calculate mean squared error (MSE)
         mse = mean_squared_error(closest_true_gene_expressions, pred_gene_expressions)
-        threshold = np.median(true_gene_expressions)
-        true_binary = (closest_true_gene_expressions >= threshold).astype(int)
-        pred_binary = (pred_gene_expressions >= threshold).astype(int)
-        f1 = f1_score(true_binary, pred_binary, average='micro')
-        cosine_sim = np.mean(cosine_similarity(closest_true_gene_expressions, pred_gene_expressions))
-        return mse, f1, cosine_sim
+        # Calculate L1 distance (mean absolute error)
+        l1_distance = np.mean(np.abs(closest_true_gene_expressions - pred_gene_expressions))
+        # Calculate cosine similarity
+        cosine_sim = np.mean([cosine_similarity(
+                                    closest_true_gene_expressions[i].reshape(1, -1),
+                                    pred_gene_expressions[i].reshape(1, -1)
+                                )[0, 0] for i in range(len(pred_gene_expressions))])
+        return mse, l1_distance, cosine_sim
 
 
 

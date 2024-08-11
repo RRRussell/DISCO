@@ -152,7 +152,7 @@ class DDPM(nn.Module):
         
         total_loss = pos_loss + exp_loss  # Combine losses
         
-        return total_loss
+        return total_loss, noise, predicted_noise
     
     def sample_single(self, tissue_index):
         # Initialize a single sample with random noise (initial condition at the last timestep)

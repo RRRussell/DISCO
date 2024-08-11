@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
 class GroundTruth:
     def __init__(self, hole_cells, gene_expression, tissue_percentages):
@@ -51,7 +51,15 @@ class STDataset(Dataset):
 
         return {'positions': positions, 'expressions': expressions, 'metadata': metadata}
     
-    
+def filter_by_tissue(dataset, tissue_name):
+    """
+    Filter the dataset to only include samples with the specified tissue type.
+    :param dataset: The original dataset.
+    :param tissue_name: The name of the tissue type to filter by.
+    :return: A filtered dataset containing only the specified tissue type.
+    """
+    filtered_samples = [sample for sample in dataset if sample['metadata']['dominant_tissue'] == tissue_name]
+    return STDataset(filtered_samples)
 
 
 
