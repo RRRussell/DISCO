@@ -48,19 +48,15 @@ class VarianceSchedule(Module):
         sigmas = self.sigmas_flex[t] * flexibility + self.sigmas_inflex[t] * (1 - flexibility)
         return sigmas
 
-
 class PointwiseNet(Module):
 
-    def __init__(self, point_dim, context_dim, residual):
+    def __init__(self, point_dim, context_dim, residual, batch_context=True):
         super().__init__()
         self.act = F.leaky_relu
         self.residual = residual
+        self.batch_context = batch_context
         self.layers = ModuleList([
             ConcatSquashLinear(point_dim, 128, context_dim+3),
-            # ConcatSquashLinear(128, 256, context_dim+3),
-            # ConcatSquashLinear(256, 512, context_dim+3),
-            # ConcatSquashLinear(512, 256, context_dim+3),
-            # ConcatSquashLinear(256, 128, context_dim+3),
             ConcatSquashLinear(128, point_dim, context_dim+3)
         ])
 
@@ -68,15 +64,24 @@ class PointwiseNet(Module):
         """
         Args:
             x:  Point clouds at some timestep t, (B, N, d).
-            beta:     Time. (B, ).
-            context:  Shape latents. (B, F).
+            beta:  Time step information, (B, ).
+            context:  Latents used as context, (B, F) or (B, N, F) depending on `batch_context`.
         """
         batch_size = x.size(0)
-        beta = beta.view(batch_size, 1, 1)          # (B, 1, 1)
-        context = context.view(batch_size, 1, -1)   # (B, 1, F)
+        num_points = x.size(1)
 
+        beta = beta.view(batch_size, 1, 1)          # (B, 1, 1)
         time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 1, 3)
-        ctx_emb = torch.cat([time_emb, context], dim=-1)    # (B, 1, F+3)
+
+        if self.batch_context:
+            # Context is shared across the batch
+            context = context.view(batch_size, 1, -1)   # (B, 1, F)
+            ctx_emb = torch.cat([time_emb, context], dim=-1)    # (B, 1, F+3)
+            ctx_emb = ctx_emb.expand(-1, num_points, -1)  # (B, N, F+3)
+        else:
+            # Context is independent for each point
+            context = context.view(batch_size, num_points, -1)  # (B, N, F)
+            ctx_emb = torch.cat([time_emb.expand(-1, num_points, -1), context], dim=-1)  # (B, N, F+3)
 
         out = x
         for i, layer in enumerate(self.layers):
@@ -88,6 +93,46 @@ class PointwiseNet(Module):
             return x + out
         else:
             return out
+
+# class PointwiseNet(Module):
+
+#     def __init__(self, point_dim, context_dim, residual):
+#         super().__init__()
+#         self.act = F.leaky_relu
+#         self.residual = residual
+#         self.layers = ModuleList([
+#             ConcatSquashLinear(point_dim, 128, context_dim+3),
+#             # ConcatSquashLinear(128, 256, context_dim+3),
+#             # ConcatSquashLinear(256, 512, context_dim+3),
+#             # ConcatSquashLinear(512, 256, context_dim+3),
+#             # ConcatSquashLinear(256, 128, context_dim+3),
+#             ConcatSquashLinear(128, point_dim, context_dim+3)
+#         ])
+
+#     def forward(self, x, beta, context):
+#         """
+#         Args:
+#             x:  Point clouds at some timestep t, (B, N, d).
+#             beta:     Time. (B, ).
+#             context:  Shape latents. (B, F).
+#         """
+#         batch_size = x.size(0)
+#         beta = beta.view(batch_size, 1, 1)          # (B, 1, 1)
+#         context = context.view(batch_size, 1, -1)   # (B, 1, F)
+
+#         time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 1, 3)
+#         ctx_emb = torch.cat([time_emb, context], dim=-1)    # (B, 1, F+3)
+
+#         out = x
+#         for i, layer in enumerate(self.layers):
+#             out = layer(ctx=ctx_emb, x=out)
+#             if i < len(self.layers) - 1:
+#                 out = self.act(out)
+
+#         if self.residual:
+#             return x + out
+#         else:
+#             return out
 
 
 class DiffusionPoint(Module):
@@ -118,7 +163,7 @@ class DiffusionPoint(Module):
         loss = F.mse_loss(e_theta.view(-1, point_dim), e_rand.view(-1, point_dim), reduction='mean')
         return loss
 
-    def sample(self, num_points, context, point_dim=3, flexibility=0.0, ret_traj=False):
+    def sample(self, num_points, context, point_dim=2, flexibility=0.0, ret_traj=False):
         batch_size = context.size(0)
         x_T = torch.randn([batch_size, num_points, point_dim]).to(context.device)
         traj = {self.var_sched.num_steps: x_T}

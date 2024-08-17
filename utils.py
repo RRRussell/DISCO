@@ -17,14 +17,19 @@ def seed_everything(seed=2024):
     random.seed(seed)    # Python random module
     np.random.seed(seed) # Numpy module
     os.environ['PYTHONHASHSEED'] = str(seed) # Env variable
-    
     torch.manual_seed(seed)  # Torch
     torch.cuda.manual_seed(seed)  # CUDA
     torch.cuda.manual_seed_all(seed)  # For multi-GPU setups
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    
     print(f'Seeding all randomness with seed={seed}')
+
+# Define Chamfer Loss for unordered data
+def chamfer_loss(predictions, targets):
+    pred_to_target_dist = torch.cdist(predictions, targets, p=2)
+    target_to_pred_dist = torch.cdist(targets, predictions, p=2)
+    loss = torch.mean(pred_to_target_dist.min(dim=1)[0]) + torch.mean(target_to_pred_dist.min(dim=1)[0])
+    return loss
 
 def visualize_test_region(slice_obs_df, test_area, title='', new_coords=None):
     slice_obs_df['fov'] = slice_obs_df['fov'].astype(int)

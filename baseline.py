@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 
+from utils import chamfer_loss
+
 class Baseline:
     def __init__(self, gene_expression_dim=374, position_dim=2):
         self.gene_expression_dim = gene_expression_dim
@@ -229,13 +231,6 @@ class KNNClustering(Baseline):
         mean_expression = mean_expression.drop(columns=['cluster']).to_numpy()
 
         return mean_coordinates, mean_expression
-
-# Define Chamfer Loss for unordered data
-def chamfer_loss(predictions, targets):
-    pred_to_target_dist = torch.cdist(predictions, targets, p=2)
-    target_to_pred_dist = torch.cdist(targets, predictions, p=2)
-    loss = torch.mean(pred_to_target_dist.min(dim=1)[0]) + torch.mean(target_to_pred_dist.min(dim=1)[0])
-    return loss
 
 # Define the Variational Autoencoder Model
 class VariationalAutoencoder(nn.Module):

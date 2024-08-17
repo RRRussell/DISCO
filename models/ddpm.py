@@ -12,6 +12,8 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 import numpy as np
 import math
 
+from utils import chamfer_loss
+
 class SinusoidalPositionalEmbedding(nn.Module):
     def __init__(self, embedding_size, device):
         super().__init__()
@@ -26,7 +28,7 @@ class SinusoidalPositionalEmbedding(nn.Module):
 
 class STModel(nn.Module):
     def __init__(self, n_positions, n_features, n_tissues, device, hidden_dim=32):
-        super(STModel, self).__init__()
+        super().__init__()
         self.n_positions = n_positions
         self.n_features = n_features
         self.n_tissues = n_tissues
@@ -47,27 +49,31 @@ class STModel(nn.Module):
         )
 
         # Embeddings for tissue type and temporal information
-        self.context_embedding = nn.Embedding(n_tissues, self.hidden_dim * 2)
-        self.time_embedding = SinusoidalPositionalEmbedding(self.hidden_dim * 2, self.device)
+        # self.context_embedding = nn.Embedding(n_tissues, self.hidden_dim * 2)
+        self.context_embedding = nn.Embedding(n_tissues, self.hidden_dim)
+        # self.time_embedding = SinusoidalPositionalEmbedding(self.hidden_dim * 2, self.device)
+        self.time_embedding = SinusoidalPositionalEmbedding(self.hidden_dim, self.device)
 
         # Final convolution to map to desired output size
         self.final_conv = nn.Sequential(
-            nn.Conv1d(self.hidden_dim * 2, self.hidden_dim, kernel_size=1),
+            # nn.Conv1d(self.hidden_dim * 2, self.hidden_dim, kernel_size=1),
+            nn.Conv1d(self.hidden_dim, self.hidden_dim, kernel_size=1),
             nn.ELU(),
-            nn.Conv1d(self.hidden_dim, self.n_positions+self.n_features, kernel_size=1)
+            # nn.Conv1d(self.hidden_dim, self.n_positions+self.n_features, kernel_size=1)
+            nn.Conv1d(self.hidden_dim, self.n_positions, kernel_size=1)
         )
 
     def forward(self, x_t, tissue_type, t, context_mask):
         positions = x_t[:, :, :self.n_positions]
-        expressions = x_t[:, :, self.n_positions:]
+        # expressions = x_t[:, :, self.n_positions:]
 
         # Ensure correct input orientation for convolutions
         positions = positions.permute(0, 2, 1)
-        expressions = expressions.permute(0, 2, 1)
+        # expressions = expressions.permute(0, 2, 1)
         
         # Process through respective convolutions
         pos_encoded = self.position_conv(positions)
-        exp_encoded = self.expression_conv(expressions)
+        # exp_encoded = self.expression_conv(expressions)
 
         # Embedding and time modulation
         tissue_embed = self.context_embedding(tissue_type)
@@ -78,7 +84,8 @@ class STModel(nn.Module):
         time_embed = time_embed.unsqueeze(2).expand_as(tissue_embed)
         
         # Combine features and embeddings
-        combined_features = (tissue_embed * torch.cat([pos_encoded, exp_encoded], dim=1)) + time_embed
+        # combined_features = (tissue_embed * torch.cat([pos_encoded, exp_encoded], dim=1)) + time_embed
+        combined_features = (tissue_embed * pos_encoded) + time_embed
         output = self.final_conv(combined_features)
         
         # Ensure output has the same sample dimension order as input
@@ -121,7 +128,7 @@ def ddpm_schedules(beta1, beta2, T):
 
 class DDPM(nn.Module):
     def __init__(self, nn_model, betas, n_T, device, drop_prob=0.1):
-        super(DDPM, self).__init__()
+        super().__init__()
         self.nn_model = nn_model.to(device)
 
         # Precompute and buffer schedule parameters
@@ -143,20 +150,33 @@ class DDPM(nn.Module):
         predicted_noise = self.nn_model(x_t, c, _ts / self.n_T, context_mask)  # Model prediction
 
         # Position loss: MSE loss for positions
-        pos_loss = self.loss_mse(predicted_noise[:, :, :2], noise[:, :, :2])
+        pos_loss = chamfer_loss(predicted_noise[:, :, :2], noise[:, :, :2])
 
-        # Expression loss: Simple MSE loss
-        exp_loss = self.loss_mse(predicted_noise[:, :, 2:], noise[:, :, 2:])
+        # # Align expressions using nearest neighbor mapping
+        # pred_positions = predicted_noise[:, :, :2]
+        # true_positions = noise[:, :, :2]
+        # # Calculate distances
+        # dist_matrix = torch.cdist(pred_positions, true_positions, p=2)
+        # # Find the closest true position for each predicted position
+        # closest_indices = dist_matrix.argmin(dim=2)
+        # # Gather the corresponding expressions
+        # closest_true_expressions = noise.gather(1, closest_indices.unsqueeze(-1).expand(-1, -1, noise.size(2)))[:, :, 2:]
+        # pred_expressions = predicted_noise[:, :, 2:]
+        # # Compute MSE for expressions
+        # exp_loss = F.mse_loss(pred_expressions, closest_true_expressions, reduction='mean')
 
-        print("position loss:", pos_loss.item(), "expression loss:", exp_loss.item())
+        # print("position loss:", pos_loss.item(), "expression loss:", exp_loss.item())
+        print("position loss:", pos_loss.item())
         
-        total_loss = pos_loss + exp_loss  # Combine losses
+        # total_loss = pos_loss + exp_loss  # Combine losses
+        total_loss = pos_loss  # Combine losses
         
         return total_loss, noise, predicted_noise
     
     def sample_single(self, tissue_index):
         # Initialize a single sample with random noise (initial condition at the last timestep)
-        x_i = torch.randn(1, 50, 376).to(self.device)  # 50 samples, 376 features (2 positions + 374 expressions)
+        # x_i = torch.randn(1, 50, 376).to(self.device)  # 50 samples, 376 features (2 positions + 374 expressions)
+        x_i = torch.randn(1, 50, 2).to(self.device)  # 50 samples, 2 features (2 positions)
         
         # Get the tissue index as context
         c_i = torch.tensor([tissue_index]).to(self.device)

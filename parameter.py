@@ -8,8 +8,12 @@ def create_args():
     parser = argparse.ArgumentParser()
     # Model arguments
     parser.add_argument('--model', type=str, default='gaussian', choices=['flow', 'gaussian'])
-    parser.add_argument('--input_dim', type=int, default=376)
+    # parser.add_argument('--input_dim', type=int, default=376)
+    parser.add_argument('--position_dim', type=int, default=2)
     parser.add_argument('--latent_dim', type=int, default=256)
+    parser.add_argument('--num_tissues', type=int, default=6)
+    parser.add_argument('--tissue_dim', type=int, default=256)
+    parser.add_argument('--expression_dim', type=int, default=374)
     parser.add_argument('--num_steps', type=int, default=100)
     parser.add_argument('--beta_1', type=float, default=1e-4)
     parser.add_argument('--beta_T', type=float, default=0.02)

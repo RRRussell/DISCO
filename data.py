@@ -74,6 +74,7 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
                         
                         if len(hole_cells) >= num_cells:
                             sampled_cells = hole_cells.sample(n=num_cells, replace=False)
+                            # sampled_cells = hole_cells
                             dominant_tissue = sampled_cells['tissue'].value_counts().idxmax()
                             if dominant_tissue in ['brain ventricle', 'olfactory region']:
                                 continue
@@ -117,9 +118,6 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
             raise NotImplementedError
     else:
         raise NotImplementedError
-
-
-
 
 def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBrainAging",
                               dominance_threshold: float = 0.9, region_size: float = 250,
@@ -182,7 +180,7 @@ def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBr
 
                         if dominant_ratio < dominance_threshold:
                             continue
-
+                        
                         training_samples.append({
                             'normalized_positions': slice_obs.loc[selected_index, ['normalized_x', 'normalized_y']].values,
                             'gene_expressions': slice_x[slice_obs.loc[selected_index].index, :].X,
