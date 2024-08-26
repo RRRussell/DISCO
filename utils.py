@@ -8,8 +8,10 @@ import anndata as ad
 import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.animation as animation
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
+from scipy.stats import truncnorm
 
 import torch
 
@@ -155,5 +157,61 @@ def sanitize_name(name):
     # Replace spaces and special characters like slashes with underscores
     return re.sub(r'[^\w\-\.]', '_', name)
 
+def truncated_normal_2d(size, mean=0.5, std=0.15, lower=0.0, upper=1.0):
+    """Generate 2D truncated normal distribution data within [lower, upper]."""
+    a, b = (lower - mean) / std, (upper - mean) / std
+    x = truncnorm.rvs(a, b, loc=mean, scale=std, size=size)
+    y = truncnorm.rvs(a, b, loc=mean, scale=std, size=size)
+    return np.column_stack((x, y))
 
+def visualize_noising_process_animation(model, initial_positions):
+    """
+    Create an animation visualizing the noising process by showing positions at different steps.
+    Args:
+        model: The GaussianVAE model containing the necessary parameters.
+        initial_positions: Initial point cloud positions (N, 2).
+    """
+    num_points, point_dim = initial_positions.shape
+    positions_list = [initial_positions]
 
+    # Retrieve parameters from the model
+    num_steps = model.args.num_steps
+    beta_1 = model.args.beta_1
+    beta_T = model.args.beta_T
+
+    # Create a linear schedule of beta values
+    betas = np.linspace(beta_1, beta_T, num_steps)
+    alphas = 1 - betas
+    alpha_bars = np.cumprod(alphas)
+
+    # Go through the diffusion steps and add noise
+    for t in range(1, num_steps + 1):
+        alpha_bar = alpha_bars[t-1]
+        noise = truncated_normal_2d(size=num_points, mean=0.5, std=0.15, lower=0.0, upper=1.0)
+        c0 = np.sqrt(alpha_bar)
+        c1 = np.sqrt(1 - alpha_bar)
+        noised_positions = c0 * initial_positions + c1 * noise
+        positions_list.append(noised_positions)
+
+    # Create animation
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    scat = ax.scatter([], [], c='red', s=5)
+
+    def init():
+        scat.set_offsets(np.zeros((num_points, 2)))
+        return scat,
+
+    def update(frame):
+        positions = positions_list[frame]
+        scat.set_offsets(positions)
+        ax.set_title(f"Step {frame}")
+        return scat,
+
+    ani = animation.FuncAnimation(fig, update, frames=len(positions_list),
+                                  init_func=init, blit=True, repeat=False)
+    
+    return ani
