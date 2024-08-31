@@ -9,6 +9,7 @@ import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 
 from utils import chamfer_loss
+from GAN import Generator, Discriminator
 
 class Baseline:
     def __init__(self, gene_expression_dim=374, position_dim=2):
@@ -232,6 +233,7 @@ class KNNClustering(Baseline):
 
         return mean_coordinates, mean_expression
 
+<<<<<<< Updated upstream
 # Define the Variational Autoencoder Model
 class VariationalAutoencoder(nn.Module):
     def __init__(self, input_dim, latent_dim):
@@ -344,3 +346,129 @@ class VAE(Baseline):
 
             return predicted_positions, predicted_expressions
 
+=======
+class GANBaseline(Baseline): 
+    def __init__(self, adata, test_area, training_dataloader, num_cells=50, num_epochs=100): 
+        super().__init__(adata, test_area, num_cells)
+        self.num_epochs = num_epochs
+        self.training_dataloader = training_dataloader
+        self.generator = None
+        self.discriminator = None
+        self.input_channel = None
+        self.output_channel = None
+    
+    def fill_region(self): 
+        slice_obs_df = pd.DataFrame(self.adata.obs)
+        slice_obs_df['center_x'] = slice_obs_df['center_x'].astype(float)
+        slice_obs_df['center_y'] = slice_obs_df['center_y'].astype(float)
+
+        # get dimensions of the hole
+        min_x = self.test_area.hole_min_x
+        max_x = self.test_area.hole_max_x
+        min_y = self.test_area.hole_min_y
+        max_y = self.test_area.hole_max_y
+        
+        # Define input channel for GAN
+        self.input_channel = 376
+        self.output_channel = 376
+
+        # Define the generator and discriminator and train
+        self.generator = Generator(self.input_channel, self.output_channel)
+        self.discriminator = Discriminator(self.output_channel)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.generator.to(device)
+        self.discriminator.to(device)
+
+        self.generator, self.discriminator, slice_shape = self.train_gan(num_epochs=self.num_epochs)
+
+        # Generate the missing slice
+        noise = torch.randn(1, slice_shape[0], slice_shape[1]).to(device)
+        generated_data = self.generator(noise)
+        # Apply sigmoid to coordinates
+        # generated_data[:, :, :2] = torch.sigmoid(generated_data[:, :, :2])
+        generated_data = generated_data.detach().cpu().squeeze(0).squeeze(0)
+
+        coordinates = generated_data[:, :2]
+        expressions = generated_data[:, 2:]
+
+        coordinates[:, 0] *= (max_x - min_x)
+        coordinates[:, 1] *= (max_y - min_y)
+
+        coordinates[:, 0] += min_x
+        coordinates[:, 1] += min_y
+
+        return coordinates.numpy(), expressions.numpy()
+
+    
+    def train_gan(self, num_epochs):
+        criterion = nn.BCELoss()
+        position_criterion = nn.MSELoss()
+        expression_criterion = nn.MSELoss()
+        optimizer_g = optim.Adam(self.generator.parameters(), lr=0.0002)
+        optimizer_d = optim.Adam(self.discriminator.parameters(), lr=0.0002)
+
+        slice_shape = []
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+        for epoch in range(num_epochs):
+            for batch in self.training_dataloader:
+                positions = batch['positions'].to(device)
+                expressions = batch['expressions'].to(device)
+                # metadata = batch['metadata']
+                
+                train_data = torch.cat((positions, expressions), dim=2).to(device)
+                slice_shape = [train_data.shape[1], train_data.shape[2]]
+
+                # Split data into position and expression parts
+                real_position_data = train_data[:, :, :2]
+                real_expression_data = train_data[:, :, 2:]
+
+                # real_data = train_data.unsqueeze(1)  # Add channel dimension [batch, 1, height, width]
+                real_data = train_data
+
+                # real_data.to(device)
+
+                # Train discriminator
+                optimizer_d.zero_grad()
+                real_labels = torch.ones(real_data.size(0), 1).to(device)
+                fake_labels = torch.zeros(real_data.size(0), 1).to(device)
+
+                outputs = self.discriminator(real_data)
+
+                # Discriminator outputs (real and fake)
+                real_outputs = self.discriminator(train_data)
+                noise = torch.randn(train_data.size(0), train_data.size(1), train_data.size(2)).to(device)
+                fake_data = self.generator(noise)
+                # fake_data[:, :, :2] = torch.sigmoid(fake_data[:, :, :2])
+                fake_outputs = self.discriminator(fake_data)
+
+                d_loss_real = criterion(real_outputs, real_labels)
+                d_loss_fake = criterion(fake_outputs, fake_labels)
+                d_loss = d_loss_real + d_loss_fake
+
+                d_loss.backward()
+                optimizer_d.step()
+
+                # Train generator
+                optimizer_g.zero_grad()
+                # Regenerate fake data
+                fake_data = self.generator(noise)
+                fake_outputs = self.discriminator(fake_data)
+                # Calculate generator loss
+                g_loss_adv = criterion(fake_outputs, real_labels)  # Adversarial loss
+                fake_position_data = fake_data[:, :, :2]
+                fake_expression_data = fake_data[:, :, 2:]
+
+                g_loss_position = position_criterion(fake_position_data, positions)
+                g_loss_expression = expression_criterion(fake_expression_data, expressions)
+                g_loss = g_loss_adv + g_loss_position + g_loss_expression
+
+                g_loss.backward()
+                optimizer_g.step()
+            
+            if (epoch + 1) % 10 == 0:
+                print(f'Epoch [{epoch+1}/{num_epochs}], d_loss: {d_loss.item()}, g_loss: {g_loss.item()}')
+        
+        return self.generator, self.discriminator, slice_shape
+>>>>>>> Stashed changes
