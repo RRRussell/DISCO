@@ -233,7 +233,6 @@ class KNNClustering(Baseline):
 
         return mean_coordinates, mean_expression
 
-<<<<<<< Updated upstream
 # Define the Variational Autoencoder Model
 class VariationalAutoencoder(nn.Module):
     def __init__(self, input_dim, latent_dim):
@@ -346,7 +345,6 @@ class VAE(Baseline):
 
             return predicted_positions, predicted_expressions
 
-=======
 class GANBaseline(Baseline): 
     def __init__(self, adata, test_area, training_dataloader, num_cells=50, num_epochs=100): 
         super().__init__(adata, test_area, num_cells)
@@ -471,4 +469,3 @@ class GANBaseline(Baseline):
                 print(f'Epoch [{epoch+1}/{num_epochs}], d_loss: {d_loss.item()}, g_loss: {g_loss.item()}')
         
         return self.generator, self.discriminator, slice_shape
->>>>>>> Stashed changes
