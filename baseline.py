@@ -345,9 +345,130 @@ class VAE(Baseline):
 
             return predicted_positions, predicted_expressions
 
+
+class LatentSpaceGAN(Baseline):
+    def __init__(self, gene_expression_dim=374, position_dim=2, latent_dim=10, noise_dim=10, learning_rate=1e-3, device=torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+        super().__init__(gene_expression_dim=gene_expression_dim, position_dim=position_dim)
+        
+        # Initialize the VAE
+        self.vae = VAE(gene_expression_dim=gene_expression_dim, position_dim=position_dim, latent_dim=latent_dim, learning_rate=learning_rate, device=device)
+        
+        # Initialize the GAN components
+        self.generator = Generator(noise_dim, latent_dim)
+        self.discriminator = Discriminator(latent_dim)
+        self.generator.to(device)
+        self.discriminator.to(device)
+        
+        self.learning_rate = learning_rate
+        self.device = device
+
+    def train_model(self, dataloader, epochs=50, max_grad_norm=1.0):
+        # Step 1: Train the VAE first
+        print("Training VAE...")
+        self.vae.train_model(dataloader, epochs=epochs, max_grad_norm=max_grad_norm)
+
+        # Step 2: Train the GAN on the latent space of the VAE
+        print("Training GAN...")
+        optimizer_G = optim.Adam(self.generator.parameters(), lr=self.learning_rate)
+        optimizer_D = optim.Adam(self.discriminator.parameters(), lr=self.learning_rate)
+        scheduler_G = optim.lr_scheduler.StepLR(optimizer_G, step_size=10, gamma=0.5)
+        scheduler_D = optim.lr_scheduler.StepLR(optimizer_D, step_size=10, gamma=0.5)
+        criterion = nn.BCELoss()
+
+
+        self.vae.model.eval()  # Freeze the VAE during GAN training
+        self.generator.train()
+        self.discriminator.train()
+
+        for epoch in range(epochs):
+            total_g_loss = 0
+            total_d_loss = 0
+            for batch in dataloader:
+                positions = batch['positions']
+                expressions = batch['expressions']
+                x = torch.cat((positions, expressions), dim=2).to(self.device)
+                
+                # Encode input data to obtain real latent codes
+                with torch.no_grad():
+                    mu, logvar = self.vae.model.encode(x)
+                    real_latent_code = self.vae.model.reparameterize(mu, logvar)
+                
+                batch_size = x.size(0)
+                noise = torch.randn(batch_size, self.generator.model[0].in_features).to(self.device)
+
+                # -------------------
+                # Train Discriminator
+                # -------------------
+                optimizer_D.zero_grad()
+
+                # Discriminator loss on real latent codes
+                real_output = self.discriminator(real_latent_code)
+                real_labels = torch.ones_like(real_output).to(self.device)
+                real_loss = criterion(real_output, real_labels)
+
+                # Discriminator loss on fake latent codes
+                fake_latent_code = self.generator(noise)
+                fake_output = self.discriminator(fake_latent_code)
+                fake_labels = torch.zeros_like(fake_output).to(self.device)
+                fake_loss = criterion(fake_output, fake_labels)
+
+                d_loss = real_loss + fake_loss
+                d_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), max_grad_norm)
+                optimizer_D.step()
+                scheduler_D.step()
+
+                total_d_loss += d_loss.item()
+
+                # -------------------
+                # Train Generator
+                # -------------------
+                optimizer_G.zero_grad()
+
+                # Generate latent code and get discriminator output
+                fake_latent_code = self.generator(noise)
+                fake_output = self.discriminator(fake_latent_code)
+                g_loss = criterion(fake_output, real_labels)  # We want to fool the discriminator
+
+                g_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.generator.parameters(), max_grad_norm)
+                optimizer_G.step()
+                scheduler_G.step()
+
+                total_g_loss += g_loss.item()
+
+            print(f"Epoch {epoch + 1}, D Loss: {total_d_loss / len(dataloader):.4f}, G Loss: {total_g_loss / len(dataloader):.4f}")
+
+    def fill_region(self, adata, test_area, num_cells=50):
+        with torch.no_grad():
+            self.generator.eval()
+            sampled_latents = torch.randn(num_cells, self.generator.model[0].in_features).to(self.device)
+            
+            # Generate latent codes using the generator
+            generated_latents = self.generator(sampled_latents)
+            
+            # Use the VAE decoder to generate predicted positions and expressions
+            decoded = self.vae.model.decoder(generated_latents)
+
+            # Normalize the decoded position outputs to be between 0 and 1
+            decoded[:, :2] = (torch.tanh(decoded[:, :2]) + 1) / 2
+
+            predicted_positions = decoded[:, :2].cpu().numpy()
+            predicted_expressions = decoded[:, 2:].cpu().numpy()
+
+            # Scale predicted positions to fit within the test area
+            predicted_positions[:, 0] = predicted_positions[:, 0] * (test_area.hole_max_x - test_area.hole_min_x) + test_area.hole_min_x
+            predicted_positions[:, 1] = predicted_positions[:, 1] * (test_area.hole_max_y - test_area.hole_min_y) + test_area.hole_min_y
+
+            return predicted_positions, predicted_expressions
+
+
 class GANBaseline(Baseline): 
-    def __init__(self, adata, test_area, training_dataloader, num_cells=50, num_epochs=100): 
-        super().__init__(adata, test_area, num_cells)
+    def __init__(self, adata, test_area, training_dataloader, num_cells=50, num_epochs=100, gene_expression_dim=374, position_dim=2): 
+        super().__init__(gene_expression_dim=gene_expression_dim, position_dim=position_dim)
+        self.adata = adata
+        self.test_area = test_area
+        self.num_cells = num_cells
         self.num_epochs = num_epochs
         self.training_dataloader = training_dataloader
         self.generator = None
