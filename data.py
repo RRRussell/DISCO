@@ -6,7 +6,7 @@ import scanpy as sc
 import anndata as ad
 
 from dataset import GroundTruth, TestArea, TestItem
-from utils import seed_everything, visualize_test_region
+from utils import seed_everything, generate_edges, visualize_test_region
 
 def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", \
                 hole_size: int = 250, num_holes: int = 2, dominance_threshold: float = 0.9, num_cells: int = 50):
@@ -76,7 +76,7 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
                             sampled_cells = hole_cells.sample(n=num_cells, replace=False)
                             # sampled_cells = hole_cells
                             dominant_tissue = sampled_cells['tissue'].value_counts().idxmax()
-                            if dominant_tissue in ['brain ventricle', 'olfactory region']:
+                            if dominant_tissue in ['brain ventricle', 'olfactory region', 'pia mater']:
                                 continue
                             dominant_tissue_ratio = sampled_cells['tissue'].value_counts(normalize=True)[dominant_tissue]
 
@@ -170,9 +170,9 @@ def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBr
                         else:
                             continue
 
-                        slice_obs.loc[selected_index, 'normalized_x'] = (slice_obs.loc[selected_index, 'center_x'] - hole_min_x) / (hole_max_x - hole_min_x)
-                        slice_obs.loc[selected_index, 'normalized_y'] = (slice_obs.loc[selected_index, 'center_y'] - hole_min_y) / (hole_max_y - hole_min_y)
-
+                        slice_obs.loc[selected_index, 'normalized_x'] = 2 * ((slice_obs.loc[selected_index, 'center_x'] - hole_min_x) / (hole_max_x - hole_min_x)) - 1
+                        slice_obs.loc[selected_index, 'normalized_y'] = 2 * ((slice_obs.loc[selected_index, 'center_y'] - hole_min_y) / (hole_max_y - hole_min_y)) - 1
+                        
                         dominant_tissue = slice_obs.loc[selected_index, 'tissue'].value_counts().idxmax()
                         if dominant_tissue in ['brain ventricle', 'olfactory region']:
                             continue
@@ -181,9 +181,14 @@ def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBr
                         if dominant_ratio < dominance_threshold:
                             continue
                         
+                        positions = slice_obs.loc[selected_index, ['normalized_x', 'normalized_y']].values
+                        expressions = slice_x[slice_obs.loc[selected_index].index, :].X    
+                        edge_index = generate_edges(positions)
+                        
                         training_samples.append({
-                            'normalized_positions': slice_obs.loc[selected_index, ['normalized_x', 'normalized_y']].values,
-                            'gene_expressions': slice_x[slice_obs.loc[selected_index].index, :].X,
+                            'normalized_positions': positions,
+                            'gene_expressions': expressions,
+                            'edge_index': edge_index,
                             'metadata': {
                                 'platform': platform,
                                 'dataset': dataset,
