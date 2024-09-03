@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from torch.nn import Module, Linear
 from torch.optim.lr_scheduler import LambdaLR
 import numpy as np
@@ -36,7 +37,7 @@ def truncated_normal_(tensor, mean=0, std=1, trunc_std=2):
 
 class ConcatSquashLinear(Module):
     def __init__(self, dim_in, dim_out, dim_ctx):
-        super(ConcatSquashLinear, self).__init__()
+        super().__init__()
         self._layer = Linear(dim_in, dim_out)
         self._hyper_bias = Linear(dim_ctx, dim_out, bias=False)
         self._hyper_gate = Linear(dim_ctx, dim_out)
@@ -74,3 +75,17 @@ def lr_func(epoch):
         return (1-frac) * 1.0 + frac * (end_lr / start_lr)
     else:
         return end_lr / start_lr
+
+class MLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.layer1 = nn.Linear(input_dim, hidden_dim)
+        self.layer2 = nn.Linear(hidden_dim, hidden_dim)
+        self.layer3 = nn.Linear(hidden_dim, output_dim)
+        self.elu = nn.ELU()
+
+    def forward(self, x):
+        x = self.elu(self.layer1(x))
+        x = self.elu(self.layer2(x))
+        x = self.layer3(x)
+        return x

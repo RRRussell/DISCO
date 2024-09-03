@@ -45,11 +45,12 @@ class STDataset(Dataset):
         sample = self.samples[idx]
         positions = torch.tensor(sample['normalized_positions'], dtype=torch.float32)
         expressions = torch.tensor(sample['gene_expressions'], dtype=torch.float32)
+        edge_index = sample['edge_index'].clone().detach().float()
         
         # Metadata could be returned as is, or parts of it could be converted to tensors if needed
         metadata = sample['metadata']
 
-        return {'positions': positions, 'expressions': expressions, 'metadata': metadata}
+        return {'positions': positions, 'expressions': expressions, 'edge_index': edge_index, 'metadata': metadata}
     
 def filter_by_tissue(dataset, tissue_name):
     """
