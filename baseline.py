@@ -428,6 +428,7 @@ class LatentSpaceGAN(Baseline):
                 # Generate latent code and get discriminator output
                 fake_latent_code = self.generator(noise)
                 fake_output = self.discriminator(fake_latent_code)
+                real_labels = real_labels.squeeze()
                 g_loss = criterion(fake_output, real_labels)  # We want to fool the discriminator
 
                 g_loss.backward()
