@@ -17,7 +17,7 @@ class GaussianVAE(Module):
         self.args = args
         
         # Encoder for integrating positional and expression data using a GCN.
-        self.region_encoder = GCNEncoder(
+        self.region_encoder = GNNEncoder(
             input_dim=args.position_dim + args.expression_dim,  # Input dimension = pos_dim + expr_dim
             hidden_dim=args.latent_dim,  # Hidden layer dimension
             zdim=args.latent_dim  # Latent dimension

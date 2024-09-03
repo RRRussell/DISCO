@@ -4,7 +4,7 @@ from torch.nn import Module, Parameter, ModuleList
 import numpy as np
 
 from .common import *
-
+from ..utils import *
 
 class VarianceSchedule(Module):
 
@@ -94,47 +94,6 @@ class PointwiseNet(Module):
         else:
             return out
 
-# class PointwiseNet(Module):
-
-#     def __init__(self, point_dim, context_dim, residual):
-#         super().__init__()
-#         self.act = F.leaky_relu
-#         self.residual = residual
-#         self.layers = ModuleList([
-#             ConcatSquashLinear(point_dim, 128, context_dim+3),
-#             # ConcatSquashLinear(128, 256, context_dim+3),
-#             # ConcatSquashLinear(256, 512, context_dim+3),
-#             # ConcatSquashLinear(512, 256, context_dim+3),
-#             # ConcatSquashLinear(256, 128, context_dim+3),
-#             ConcatSquashLinear(128, point_dim, context_dim+3)
-#         ])
-
-#     def forward(self, x, beta, context):
-#         """
-#         Args:
-#             x:  Point clouds at some timestep t, (B, N, d).
-#             beta:     Time. (B, ).
-#             context:  Shape latents. (B, F).
-#         """
-#         batch_size = x.size(0)
-#         beta = beta.view(batch_size, 1, 1)          # (B, 1, 1)
-#         context = context.view(batch_size, 1, -1)   # (B, 1, F)
-
-#         time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 1, 3)
-#         ctx_emb = torch.cat([time_emb, context], dim=-1)    # (B, 1, F+3)
-
-#         out = x
-#         for i, layer in enumerate(self.layers):
-#             out = layer(ctx=ctx_emb, x=out)
-#             if i < len(self.layers) - 1:
-#                 out = self.act(out)
-
-#         if self.residual:
-#             return x + out
-#         else:
-#             return out
-
-
 class DiffusionPoint(Module):
 
     def __init__(self, net, var_sched:VarianceSchedule):
@@ -163,7 +122,19 @@ class DiffusionPoint(Module):
         loss = F.mse_loss(e_theta.view(-1, point_dim), e_rand.view(-1, point_dim), reduction='mean')
         return loss
 
-    def sample(self, num_points, context, point_dim=2, flexibility=0.0, ret_traj=False):
+    def sample(self, num_points, context, point_dim=2, flexibility=0.0, ret_traj=False, expansion_factor=1, test_item_list=None, mode="position"):
+        """
+        Sample from the diffusion model. Supports integrating known positions or gene expressions from test items.
+
+        Args:
+            num_points: Number of points to sample.
+            context: Latent context tensor.
+            point_dim: Dimensionality of the points.
+            flexibility: Flexibility in the sampling process.
+            ret_traj: If True, return the whole trajectory.
+            test_item_list: List of test items with ground truth data.
+            mode: Sampling mode - either "position" or "expression".
+        """
         batch_size = context.size(0)
         x_T = torch.randn([batch_size, num_points, point_dim]).to(context.device)
         traj = {self.var_sched.num_steps: x_T}
@@ -180,6 +151,11 @@ class DiffusionPoint(Module):
             beta = self.var_sched.betas[[t]*batch_size]
             e_theta = self.net(x_t, beta=beta, context=context)
             x_next = c0 * (x_t - c1 * e_theta) + sigma * z
+            
+            # Integrate known positions or gene expressions
+            if test_item_list is not None:
+                x_next = self.integrate_known_data(x_next, test_item_list, t, expansion_factor, mode)
+            
             traj[t-1] = x_next.detach()     # Stop gradient and save trajectory.
             traj[t] = traj[t].cpu()         # Move previous output to CPU memory.
             if not ret_traj:
@@ -190,3 +166,39 @@ class DiffusionPoint(Module):
         else:
             return traj[0]
 
+    def integrate_known_data(self, x_next, test_item_list, t, expansion_factor, mode="position"):
+        """
+        Integrate the known positions or gene expressions from the test area into the sampled positions.
+
+        Args:
+            x_next: (B, expanded_num_points, pos_dim) Sampled positions at time t.
+            test_item_list: List of test items with ground truth data.
+            t: Current time step in the diffusion process.
+            mode: Integration mode - either "position" or "expression".
+        """
+        central_region_min = -1 / (2 * expansion_factor + 1)
+        central_region_max = 1 / (2 * expansion_factor + 1)
+        c0 = 1.0 / torch.sqrt(self.var_sched.alphas[t])
+        c1 = (1 - self.var_sched.alphas[t]) / torch.sqrt(1 - self.var_sched.alpha_bars[t])
+
+        for i, test_item in enumerate(test_item_list):
+            expanded_positions, expanded_gene_expressions = extract_cells_from_expanded_region(test_item, expansion_factor=1)
+            normalized_positions = normalize_positions_within_test_area(expanded_positions, test_item.test_area)
+            x_next_normalized = normalize_positions(x_next[i])
+            central_mask = (x_next_normalized[:, 0] > central_region_min) & (x_next_normalized[:, 0] < central_region_max) & \
+                            (x_next_normalized[:, 1] > central_region_min) & (x_next_normalized[:, 1] < central_region_max)
+                
+            if mode == "position":
+                x_next_new = torch.zeros_like(x_next[i])
+                x_next_new[central_mask] = x_next_normalized[central_mask]
+                noise = torch.randn_like(normalized_positions)
+                surrounding_positions_noisy = c0 * normalized_positions + c1 * noise
+                x_next_new[~central_mask] = surrounding_positions_noisy
+                x_next[i] = x_next_new
+
+            elif mode == "expression":
+                # Similar handling for gene expressions if needed
+                # Normalize and integrate gene expression data
+                pass
+
+        return x_next

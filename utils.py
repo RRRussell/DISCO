@@ -39,6 +39,66 @@ def generate_edges(positions, k=5):
     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
     return edge_index
 
+def extract_cells_from_expanded_region(test_item, expansion_factor=1):
+    """
+    Extract positions and gene expressions from the expanded region in test_item.adata.
+    
+    Args:
+        test_item: The test item containing adata and test_area information.
+        expansion_factor: Factor by which to expand the region for extraction.
+        
+    Returns:
+        expanded_positions: Tensor of positions in the expanded region (N, 2).
+        expanded_gene_expressions: Tensor of gene expressions in the expanded region (N, G).
+    """
+    # Calculate expanded region bounds
+    min_x = test_item.test_area.hole_min_x - (test_item.test_area.hole_max_x - test_item.test_area.hole_min_x) * expansion_factor
+    max_x = test_item.test_area.hole_max_x + (test_item.test_area.hole_max_x - test_item.test_area.hole_min_x) * expansion_factor
+    min_y = test_item.test_area.hole_min_y - (test_item.test_area.hole_max_y - test_item.test_area.hole_min_y) * expansion_factor
+    max_y = test_item.test_area.hole_max_y + (test_item.test_area.hole_max_y - test_item.test_area.hole_min_y) * expansion_factor
+
+    # Extract cells within this expanded region from test_item.adata
+    adata = test_item.adata
+    cells_in_expanded_region = adata[(adata.obs['center_x'] >= min_x) & (adata.obs['center_x'] <= max_x) &
+                                     (adata.obs['center_y'] >= min_y) & (adata.obs['center_y'] <= max_y)]
+    
+    # Extract positions and gene expressions
+    expanded_positions = cells_in_expanded_region.obs[['center_x', 'center_y']].values
+    expanded_gene_expressions = cells_in_expanded_region.X  # Assuming the gene expressions are stored in adata.X
+    
+    # Convert to tensors
+    expanded_positions = torch.tensor(expanded_positions, dtype=torch.float32)
+    expanded_gene_expressions = torch.tensor(expanded_gene_expressions.toarray(), dtype=torch.float32)  # Convert sparse matrix to dense if necessary
+    
+    return expanded_positions, expanded_gene_expressions
+
+def normalize_positions(positions):
+    """
+    Normalize the positions along x and y axis separately to the range [-1, 1].
+    Args:
+        positions: (N, 2) The positions to normalize.
+    Returns:
+        normalized_positions: (N, 2) The normalized positions.
+    """
+    normalized_positions = positions.clone()
+    normalized_positions[:, 0] = 2 * (positions[:, 0] - positions[:, 0].min()) / (positions[:, 0].max() - positions[:, 0].min()) - 1
+    normalized_positions[:, 1] = 2 * (positions[:, 1] - positions[:, 1].min()) / (positions[:, 1].max() - positions[:, 1].min()) - 1
+    return normalized_positions
+    
+def normalize_positions_within_test_area(positions, test_area):
+    """
+    Normalize the positions to the range [-1, 1].
+    Args:
+        positions: (N, pos_dim) The positions to normalize.
+        test_area: An object containing the original coordinate ranges.
+    Returns:
+        normalized_positions: (N, pos_dim) The normalized positions.
+    """
+    normalized_positions = positions.clone()
+    normalized_positions[:, 0] = 2 * (positions[:, 0] - test_area.hole_min_x) / (test_area.hole_max_x - test_area.hole_min_x) - 1
+    normalized_positions[:, 1] = 2 * (positions[:, 1] - test_area.hole_min_y) / (test_area.hole_max_y - test_area.hole_min_y) - 1
+    return normalized_positions
+    
 # Define Chamfer Loss for unordered data
 def chamfer_loss(predictions, targets):
     pred_to_target_dist = torch.cdist(predictions, targets, p=2)

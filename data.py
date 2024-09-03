@@ -13,11 +13,11 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
     
     seed_everything()
     
-    fold_dir = "MERFISH/9545288f-ad53-4fea-bc3d-a356cd2786a6.h5ad"
+    fold_dir = "/extra/zhanglab0/SpatialTranscriptomicsData/"
     
     if platform == "MERFISH":
         if dataset == "MouseBrainAging":
-            adata = ad.read_h5ad(fold_dir)
+            adata = ad.read_h5ad(fold_dir + platform + "/" + dataset + "/2330673b-b5dc-4690-bbbe-8f409362df31.h5ad")
             obs = adata.obs
             for field in ['min_x', 'max_x', 'min_y', 'max_y', 'center_x', 'center_y']:
                 obs[field] = obs[field].astype(float)
@@ -38,7 +38,7 @@ def load_test_data(platform: str = "MERFISH", dataset: str = "MouseBrainAging", 
                     slice_obs_df = pd.DataFrame(slice_obs)
                     slice_obs_df['fov'] = slice_obs_df['fov'].cat.remove_unused_categories()
                     
-                    fov_boundaries = slice_obs_df.groupby('fov', observed=False).agg(
+                    fov_boundaries = slice_obs_df.groupby('fov').agg(
                         min_x=('min_x', 'min'),
                         max_x=('max_x', 'max'),
                         min_y=('min_y', 'min'),
@@ -124,10 +124,10 @@ def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBr
                               num_samples_per_slice: int = 10, num_cells: int = 50):
     seed_everything()
 
-    fold_dir = "MERFISH/9545288f-ad53-4fea-bc3d-a356cd2786a6.h5ad"
+    fold_dir = "/extra/zhanglab0/SpatialTranscriptomicsData/"
     
     if platform == "MERFISH" and dataset == "MouseBrainAging":
-        adata = ad.read_h5ad(fold_dir)
+        adata = ad.read_h5ad(fold_dir + platform + "/" + dataset + "/2330673b-b5dc-4690-bbbe-8f409362df31.h5ad")
         obs = adata.obs
         for field in ['min_x', 'max_x', 'min_y', 'max_y', 'center_x', 'center_y']:
             obs[field] = obs[field].astype(float)
