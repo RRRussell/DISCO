@@ -3,8 +3,8 @@ import torch.nn.functional as F
 from torch.nn import Module, Parameter, ModuleList
 import numpy as np
 
-from .common import *
-from ..utils import *
+from models.common import *
+from utils import *
 
 class VarianceSchedule(Module):
 
@@ -48,22 +48,22 @@ class VarianceSchedule(Module):
         sigmas = self.sigmas_flex[t] * flexibility + self.sigmas_inflex[t] * (1 - flexibility)
         return sigmas
 
-class PointwiseNet(Module):
+class PositionDenoiseNet(Module):
 
-    def __init__(self, point_dim, context_dim, residual, batch_context=True):
+    def __init__(self, position_dim, latent_dim, context_dim, residual, batch_context=True):
         super().__init__()
         self.act = F.leaky_relu
         self.residual = residual
         self.batch_context = batch_context
         self.layers = ModuleList([
-            ConcatSquashLinear(point_dim, 128, context_dim+3),
-            ConcatSquashLinear(128, point_dim, context_dim+3)
+            ConcatSquashLinear(position_dim, latent_dim, context_dim+3),
+            ConcatSquashLinear(latent_dim, position_dim, context_dim+3)
         ])
 
     def forward(self, x, beta, context):
         """
         Args:
-            x:  Point clouds at some timestep t, (B, N, d).
+            x:  Cell positions at some timestep t, (B, N, d).
             beta:  Time step information, (B, ).
             context:  Latents used as context, (B, F) or (B, N, F) depending on `batch_context`.
         """
@@ -76,12 +76,12 @@ class PointwiseNet(Module):
         if self.batch_context:
             # Context is shared across the batch
             context = context.view(batch_size, 1, -1)   # (B, 1, F)
-            ctx_emb = torch.cat([time_emb, context], dim=-1)    # (B, 1, F+3)
+            ctx_emb = torch.cat([context, time_emb], dim=-1)    # (B, 1, F+3)
             ctx_emb = ctx_emb.expand(-1, num_points, -1)  # (B, N, F+3)
         else:
             # Context is independent for each point
             context = context.view(batch_size, num_points, -1)  # (B, N, F)
-            ctx_emb = torch.cat([time_emb.expand(-1, num_points, -1), context], dim=-1)  # (B, N, F+3)
+            ctx_emb = torch.cat([context, time_emb.expand(-1, num_points, -1)], dim=-1)  # (B, N, F+3)
 
         out = x
         for i, layer in enumerate(self.layers):
@@ -94,7 +94,53 @@ class PointwiseNet(Module):
         else:
             return out
 
-class DiffusionPoint(Module):
+class ExpressionDenoiseNet(Module):
+
+    def __init__(self, expression_dim, latent_dim, context_dim, residual, batch_context=True):
+        super().__init__()
+        self.act = F.leaky_relu
+        self.residual = residual
+        self.batch_context = batch_context
+        self.layers = ModuleList([
+            ConcatSquashLinear(expression_dim, latent_dim, context_dim+3),
+            ConcatSquashLinear(latent_dim, expression_dim, context_dim+3)
+        ])
+
+    def forward(self, x, beta, context):
+        """
+        Args:
+            x:  Cell positions at some timestep t, (B, N, d).
+            beta:  Time step information, (B, ).
+            context:  Latents used as context, (B, F) or (B, N, F) depending on `batch_context`.
+        """
+        batch_size = x.size(0)
+        num_points = x.size(1)
+
+        beta = beta.view(batch_size, 1, 1)          # (B, 1, 1)
+        time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 1, 3)
+
+        if self.batch_context:
+            # Context is shared across the batch
+            context = context.view(batch_size, 1, -1)   # (B, 1, F)
+            ctx_emb = torch.cat([context, time_emb], dim=-1)    # (B, 1, F+3)
+            ctx_emb = ctx_emb.expand(-1, num_points, -1)  # (B, N, F+3)
+        else:
+            # Context is independent for each point
+            context = context.view(batch_size, num_points, -1)  # (B, N, F)
+            ctx_emb = torch.cat([context, time_emb.expand(-1, num_points, -1)], dim=-1)  # (B, N, F+3)
+
+        out = x
+        for i, layer in enumerate(self.layers):
+            out = layer(ctx=ctx_emb, x=out)
+            if i < len(self.layers) - 1:
+                out = self.act(out)
+
+        if self.residual:
+            return x + out
+        else:
+            return out
+        
+class DiffusionModel(Module):
 
     def __init__(self, net, var_sched:VarianceSchedule):
         super().__init__()
@@ -104,8 +150,8 @@ class DiffusionPoint(Module):
     def get_loss(self, x_0, context, t=None):
         """
         Args:
-            x_0:  Input point cloud, (B, N, d).
-            context:  Shape latent, (B, F).
+            x_0: Input point, (B, N, d).
+            context: Latent, (B, F).
         """
         batch_size, _, point_dim = x_0.size()
         if t == None:
@@ -182,19 +228,30 @@ class DiffusionPoint(Module):
         c1 = (1 - self.var_sched.alphas[t]) / torch.sqrt(1 - self.var_sched.alpha_bars[t])
 
         for i, test_item in enumerate(test_item_list):
-            expanded_positions, expanded_gene_expressions = extract_cells_from_expanded_region(test_item, expansion_factor=1)
-            normalized_positions = normalize_positions_within_test_area(expanded_positions, test_item.test_area)
+            # Extract the surrounding (real) cells from the expanded region
+            surrounding_real_positions, surrounding_real_gene_expressions = extract_cells_from_expanded_region(test_item, expansion_factor=expansion_factor)
+            num_surrounding_real_cells = surrounding_real_positions.shape[0]
+            normalized_surrounding_real_positions = normalize_positions_within_test_area(surrounding_real_positions, test_item.test_area).to(x_next.device)
             x_next_normalized = normalize_positions(x_next[i])
             central_mask = (x_next_normalized[:, 0] > central_region_min) & (x_next_normalized[:, 0] < central_region_max) & \
                             (x_next_normalized[:, 1] > central_region_min) & (x_next_normalized[:, 1] < central_region_max)
-                
+            predicted_outer_indices = (~central_mask).nonzero(as_tuple=True)[0]  # Indices of outer cells
+            num_predicted_outer_cells = predicted_outer_indices.size(0)
+        
             if mode == "position":
-                x_next_new = torch.zeros_like(x_next[i])
-                x_next_new[central_mask] = x_next_normalized[central_mask]
-                noise = torch.randn_like(normalized_positions)
-                surrounding_positions_noisy = c0 * normalized_positions + c1 * noise
-                x_next_new[~central_mask] = surrounding_positions_noisy
-                x_next[i] = x_next_new
+                # Compare the number of surrounding (real) cells and predicted outer cells
+                if num_surrounding_real_cells > num_predicted_outer_cells:
+                    # If more real surrounding cells, randomly select the same number of real cells
+                    selected_surrounding_indices = torch.randperm(num_surrounding_real_cells)[:num_predicted_outer_cells]
+                    noise = torch.randn_like(normalized_surrounding_real_positions[selected_surrounding_indices]).to(x_next.device)
+                    noisy_surrounding_real_positions = c0 * normalized_surrounding_real_positions[selected_surrounding_indices] + c1 * noise
+                    x_next[i, predicted_outer_indices] = noisy_surrounding_real_positions
+                else:
+                    # If more predicted outer cells, randomly select the same number of predicted outer cells
+                    selected_predicted_indices = torch.randperm(num_predicted_outer_cells)[:num_surrounding_real_cells]
+                    noise = torch.randn_like(normalized_surrounding_real_positions).to(x_next.device)
+                    noisy_surrounding_real_positions = c0 * normalized_surrounding_real_positions + c1 * noise
+                    x_next[i, predicted_outer_indices[selected_predicted_indices]] = noisy_surrounding_real_positions
 
             elif mode == "expression":
                 # Similar handling for gene expressions if needed

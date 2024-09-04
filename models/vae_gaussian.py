@@ -3,8 +3,7 @@ from torch.nn import Module
 
 from .common import *
 from .diffusion import *
-from .encoders import *
-from .gnn_encoder import *
+from .encoder import *
 
 class GaussianVAE(Module):
     """
@@ -18,25 +17,24 @@ class GaussianVAE(Module):
         
         # Encoder for integrating positional and expression data using a GCN.
         self.region_encoder = GNNEncoder(
-            input_dim=args.position_dim + args.expression_dim,  # Input dimension = pos_dim + expr_dim
+            input_dim=args.expression_dim,  # Input dimension = expr_dim
             hidden_dim=args.latent_dim,  # Hidden layer dimension
             zdim=args.latent_dim  # Latent dimension
         )
         
-        # MLP for encoding positions before passing them into the diffusion model.
-        self.position_encoder = MLP(
-            input_dim=args.position_dim,  # Input dimension = pos_dim
-            hidden_dim=args.encoded_position_dim,  # Hidden layer dimension
-            output_dim=args.encoded_position_dim  # Encoded position dimension
+        # Encoding positions before passing them into the diffusion model.
+        self.position_encoder = SineCosinePositionalEncoding(
+            zdim=args.encoded_position_dim  # Set the dimension of the encoding
         )
         
         # Embedding for tissue types
         self.tissue_embedding = torch.nn.Embedding(args.num_tissues, args.tissue_dim)  # (B, tissue_dim)
 
         # Diffusion model for generating or reconstructing positions
-        self.position_diffusion = DiffusionPoint(
-            net=PointwiseNet(
-                point_dim=args.position_dim,  # Point dimension = pos_dim
+        self.position_diffusion = DiffusionModel(
+            net=PositionDenoiseNet(
+                position_dim=args.position_dim,  # Point dimension = pos_dim
+                latent_dim=args.latent_dim,
                 context_dim=args.latent_dim + args.tissue_dim,  # Context dimension = latent_dim + tissue_dim
                 residual=args.residual,
                 batch_context=True
@@ -50,9 +48,10 @@ class GaussianVAE(Module):
         )
 
         # Diffusion model for generating or reconstructing gene expressions
-        self.expression_diffusion = DiffusionPoint(
-            net=PointwiseNet(
-                point_dim=args.expression_dim,  # Point dimension = expr_dim
+        self.expression_diffusion = DiffusionModel(
+            net=ExpressionDenoiseNet(
+                expression_dim=args.expression_dim,  # Point dimension = expr_dim
+                latent_dim=args.latent_dim,
                 context_dim=args.latent_dim + args.tissue_dim + args.encoded_position_dim,  # Context dimension = latent_dim + tissue_dim + encoded_pos_dim
                 residual=args.residual,
                 batch_context=False
@@ -65,9 +64,9 @@ class GaussianVAE(Module):
             )
         )
     
-    def encode_all(self, positions, expressions, edge_index):
+    def encode_all(self, expressions, edge_index):
         """
-        Encode both positions and expressions using a GCN.
+        Encode both positions (edges) and expressions (node features) using a GNN.
         Args:
             positions: (B, N, pos_dim)
             expressions: (B, N, expr_dim)
@@ -76,16 +75,14 @@ class GaussianVAE(Module):
             z_mu: Mean of the latent variables (B, latent_dim)
             z_sigma: Log variance of the latent variables (B, latent_dim)
         """
-        B, N, _ = positions.size()
-        # Concatenate positions and expressions across the feature dimension.
-        x_all = torch.cat([positions, expressions], dim=-1).to(positions.device)  # (B, N, pos_dim + expr_dim)
+        B, N, _ = expressions.size()
         # Flatten batch dimension for processing with GCN.
-        x_all = torch.cat([x_all[i] for i in range(B)], dim=0)  # (B * N, pos_dim + expr_dim)
+        expressions_batch = torch.cat([expressions[i] for i in range(B)], dim=0)  # (B * N, expr_dim)
         # Adjust edge_index for each graph in the batch.
-        edge_index = torch.cat([edge_index[i].to(torch.long) + i * N for i in range(B)], dim=1)  # (2, E * B)
+        edge_index_batch = torch.cat([edge_index[i].to(torch.long) + i * N for i in range(B)], dim=1)  # (2, E * B)
         # Create batch vector for pooling.
-        batch = torch.tensor([i for i in range(B) for _ in range(N)]).to(positions.device)  # (B * N,)
-        z_mu, z_sigma = self.region_encoder(x_all, edge_index, batch)
+        batch = torch.tensor([i for i in range(B) for _ in range(N)]).to(expressions.device)  # (B * N,)
+        z_mu, z_sigma = self.region_encoder(expressions_batch, edge_index_batch, batch)
         return z_mu, z_sigma
     
     def get_position_loss(self, positions, expressions, edge_index, tissue_labels, kl_weight=1.0):
@@ -100,7 +97,7 @@ class GaussianVAE(Module):
         Returns:
             position_loss: The computed loss value
         """
-        z_mu, z_sigma = self.encode_all(positions, expressions, edge_index)
+        z_mu, z_sigma = self.encode_all(expressions, edge_index)
         z = reparameterize_gaussian(mean=z_mu, logvar=z_sigma)  # (B, latent_dim)
         loss_prior = torch.mean(-0.5 * torch.sum(1 + z_sigma - z_mu ** 2 - z_sigma.exp(), dim=1), dim=0)
         # Get tissue embeddings and concatenate with latent variables.
@@ -123,7 +120,7 @@ class GaussianVAE(Module):
         Returns:
             loss_recons: The computed reconstruction loss value
         """
-        z_mu, z_sigma = self.encode_all(real_positions, real_expressions, edge_index)
+        z_mu, z_sigma = self.encode_all(real_expressions, edge_index)
         z = reparameterize_gaussian(mean=z_mu, logvar=z_sigma)  # (B, latent_dim)
         z_expand = z.unsqueeze(1).expand(-1, predicted_positions.size(1), -1)  # (B, N, latent_dim)
         # Get tissue embeddings and concatenate with predicted positions.
@@ -146,7 +143,6 @@ class GaussianVAE(Module):
         Returns:
             nearest_expressions: (B, N, expr_dim) Nearest gene expressions for predicted positions.
         """
-        B, N, d = predicted_positions.shape
         G = real_expressions.shape[2]  # Gene expression dimension
         # Compute pairwise distances between predicted and real positions.
         distances = torch.cdist(predicted_positions, real_positions)  # (B, N, N)
@@ -160,7 +156,7 @@ class GaussianVAE(Module):
         )
         return nearest_expressions
     
-    def sample_positions(self, z, tissue_labels, num_points, flexibility=0.0, truncate_std=None):
+    def sample_positions(self, z, tissue_labels, num_points, flexibility=0.0, truncate_std=None, expansion_factor=1, test_item_list=None, mode="position"):
         """
         Sample positions using the position diffusion model.
         Args:
@@ -172,17 +168,56 @@ class GaussianVAE(Module):
         """
         if truncate_std is not None:
             z = truncated_normal_(z, mean=0, std=1, trunc_std=truncate_std)
+
         # Get tissue embeddings and concatenate with latent variables.
         tissue_embed = self.tissue_embedding(tissue_labels)  # (B, tissue_dim)
         context = torch.cat([z, tissue_embed], dim=-1)  # (B, latent_dim + tissue_dim)
-        samples = self.position_diffusion.sample(num_points, context=context, point_dim=self.args.position_dim, flexibility=flexibility)
-        # Min-max normalization
-        min_val = samples.min(dim=1, keepdim=True)[0]
-        max_val = samples.max(dim=1, keepdim=True)[0]
-        samples = (samples - min_val) / (max_val - min_val + 1e-7)  # Adding epsilon to avoid division by zero
-        # Scaling to range [-1, 1]
-        samples = samples * 2 - 1
-        return samples
+
+        # Sample positions using diffusion model
+        samples = self.position_diffusion.sample(num_points, context=context, 
+                                                point_dim=self.args.position_dim, 
+                                                flexibility=flexibility, 
+                                                expansion_factor=expansion_factor, 
+                                                test_item_list=test_item_list, 
+                                                mode=mode)
+
+        # If we are using the neighborhood information (test_item_list is not None)
+        if test_item_list is not None:
+            central_region_min = -1 / (2 * expansion_factor + 1)
+            central_region_max = 1 / (2 * expansion_factor + 1)
+            selected_positions = []
+
+            for i, test_item in enumerate(test_item_list):
+                # Normalize the predicted positions
+                samples_normalized = normalize_positions(samples[i])
+
+                # Identify the cells in the central region
+                central_mask = (samples_normalized[:, 0] > central_region_min) & (samples_normalized[:, 0] < central_region_max) & \
+                            (samples_normalized[:, 1] > central_region_min) & (samples_normalized[:, 1] < central_region_max)
+
+                central_positions = samples[i][central_mask]  # Get positions inside the central region
+
+                # If more than 50 positions are in the central region, randomly sample 50 positions
+                if central_positions.shape[0] > 50:
+                    selected_indices = torch.randperm(central_positions.shape[0])[:50]  # Randomly select 50 indices
+                    central_positions = central_positions[selected_indices]
+
+                selected_positions.append(central_positions)
+
+            # Convert list of selected positions back to a tensor
+            selected_positions = torch.stack(selected_positions, dim=0)
+
+            return selected_positions
+
+        # If not using neighborhood information, normalize the output as usual
+        else:
+            # Min-max normalization
+            min_val = samples.min(dim=1, keepdim=True)[0]
+            max_val = samples.max(dim=1, keepdim=True)[0]
+            samples = (samples - min_val) / (max_val - min_val + 1e-7)  # Adding epsilon to avoid division by zero
+            # Scaling to range [-1, 1]
+            samples = samples * 2 - 1
+            return samples
     
     def sample_expressions(self, z, tissue_labels, predicted_positions, flexibility=0.0, truncate_std=None):
         """
@@ -224,16 +259,3 @@ class GaussianVAE(Module):
         predicted_expressions = self.sample_expressions(z, tissue_labels, predicted_positions, flexibility=flexibility)
         return predicted_positions, predicted_expressions
     
-    def map_position_back(self, predicted_positions, test_area):
-        """
-        Map predicted positions back to the original coordinate range.
-        Args:
-            predicted_positions: (B, N, pos_dim) Predicted positions in normalized space
-            test_area: An object containing the original coordinate ranges
-        Returns:
-            predicted_positions: (B, N, pos_dim) Predicted positions in original space
-        """
-        predicted_positions = (predicted_positions + 1) / 2.0
-        predicted_positions[:, 0] = predicted_positions[:, 0] * (test_area.hole_max_x - test_area.hole_min_x) + test_area.hole_min_x
-        predicted_positions[:, 1] = predicted_positions[:, 1] * (test_area.hole_max_y - test_area.hole_min_y) + test_area.hole_min_y
-        return predicted_positions

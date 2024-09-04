@@ -98,6 +98,41 @@ def normalize_positions_within_test_area(positions, test_area):
     normalized_positions[:, 0] = 2 * (positions[:, 0] - test_area.hole_min_x) / (test_area.hole_max_x - test_area.hole_min_x) - 1
     normalized_positions[:, 1] = 2 * (positions[:, 1] - test_area.hole_min_y) / (test_area.hole_max_y - test_area.hole_min_y) - 1
     return normalized_positions
+
+def normalize_positions_within_expanded_test_area(positions, test_area, expansion_factor=1):
+    """
+    Normalize the positions to the range [-1, 1].
+    Args:
+        positions: (N, pos_dim) The positions to normalize.
+        test_area: An object containing the original coordinate ranges.
+    Returns:
+        normalized_positions: (N, pos_dim) The normalized positions.
+    """
+    size_x = test_area.hole_max_x - test_area.hole_min_x
+    size_y = test_area.hole_max_y - test_area.hole_min_y
+    min_x = test_area.hole_min_x - expansion_factor * size_x
+    max_x = test_area.hole_max_x + expansion_factor * size_x
+    min_y = test_area.hole_min_y - expansion_factor * size_y
+    max_y = test_area.hole_max_y + expansion_factor * size_y
+    normalized_positions = positions.clone()
+    normalized_positions[:, 0] = 2 * (positions[:, 0] - min_x) / (max_x - min_x) - 1
+    normalized_positions[:, 1] = 2 * (positions[:, 1] - min_y) / (max_y - min_y) - 1
+    return normalized_positions
+
+def map_position_back(predicted_positions, test_area):
+    """
+    Map predicted positions back to the original coordinate range.
+    Args:
+        predicted_positions: (B, N, pos_dim) Predicted positions in normalized space
+        test_area: An object containing the original coordinate ranges
+    Returns:
+        predicted_positions: (B, N, pos_dim) Predicted positions in original space
+    """
+    predicted_positions = (predicted_positions + 1) / 2.0
+    predicted_positions[:, 0] = predicted_positions[:, 0] * (test_area.hole_max_x - test_area.hole_min_x) + test_area.hole_min_x
+    predicted_positions[:, 1] = predicted_positions[:, 1] * (test_area.hole_max_y - test_area.hole_min_y) + test_area.hole_min_y
+    return predicted_positions
+
     
 # Define Chamfer Loss for unordered data
 def chamfer_loss(predictions, targets):
@@ -307,7 +342,51 @@ def visualize_noising_process_animation(model, initial_positions):
     
     return ani
 
-def visualize_sampling_process_animation(model, num_points=500, point_dim=2, flexibility=0.0):
+# def visualize_sampling_process_animation(model, num_points=500, point_dim=2, flexibility=0.0):
+#     """
+#     Create an animation visualizing the sampling process by showing positions at different steps.
+#     Args:
+#         model: The diffusion model containing the necessary parameters.
+#         num_points: Number of points to sample per cloud.
+#         context: The context tensor used for sampling.
+#         point_dim: Dimension of the points (default=2).
+#         flexibility: Flexibility parameter for sigma.
+#     """
+#     # Get the trajectory of sampled positions
+#     z = torch.randn(1, model.args.latent_dim).to(model.args.device)
+#     tissue_embed = model.tissue_embedding(torch.tensor([0], device=model.args.device))  # (B, tissue_dim)
+#     z_with_tissue = torch.cat([z, tissue_embed], dim=-1)  # (B, F + tissue_dim)
+#     traj = model.position_diffusion.sample(num_points=500, context=z_with_tissue, point_dim=point_dim, flexibility=flexibility, ret_traj=True)
+    
+#     # Convert trajectory dictionary to a list of positions
+#     positions_list = [traj[t].cpu().numpy().squeeze(0) for t in sorted(traj.keys())]
+        
+#     normalized_positions_list = positions_list
+
+#     # Create animation
+#     fig, ax = plt.subplots(figsize=(6, 6))
+#     ax.set_xlim(-2, 2)
+#     ax.set_ylim(-2, 2)
+#     ax.set_xlabel('X')
+#     ax.set_ylabel('Y')
+#     scat = ax.scatter([], [], c='blue', s=5)
+
+#     def init():
+#         scat.set_offsets(np.zeros((num_points, point_dim)))
+#         return scat,
+
+#     def update(frame):
+#         positions = normalized_positions_list[frame]
+#         scat.set_offsets(positions)
+#         ax.set_title(f"Step {frame + 1}")
+#         return scat,
+
+#     ani = animation.FuncAnimation(fig, update, frames=len(normalized_positions_list),
+#                                   init_func=init, blit=True, repeat=False)
+    
+#     return ani
+
+def visualize_sampling_process_animation(model, num_points=500, point_dim=2, flexibility=0.0, expansion_factor=1, test_item_list=None, mode="position"):
     """
     Create an animation visualizing the sampling process by showing positions at different steps.
     Args:
@@ -321,22 +400,17 @@ def visualize_sampling_process_animation(model, num_points=500, point_dim=2, fle
     z = torch.randn(1, model.args.latent_dim).to(model.args.device)
     tissue_embed = model.tissue_embedding(torch.tensor([0], device=model.args.device))  # (B, tissue_dim)
     z_with_tissue = torch.cat([z, tissue_embed], dim=-1)  # (B, F + tissue_dim)
-    traj = model.position_diffusion.sample(num_points=500, context=z_with_tissue, point_dim=point_dim, flexibility=flexibility, ret_traj=True)
+    traj = model.position_diffusion.sample(num_points=500, 
+                                           context=z_with_tissue, 
+                                           point_dim=point_dim, 
+                                           flexibility=flexibility, 
+                                           ret_traj=True, 
+                                           expansion_factor=expansion_factor, 
+                                           test_item_list=test_item_list, 
+                                           mode=mode)
     
     # Convert trajectory dictionary to a list of positions
     positions_list = [traj[t].cpu().numpy().squeeze(0) for t in sorted(traj.keys())]
-    
-    # # 对 positions_list 中的每个 positions 进行归一化处理
-    # normalized_positions_list = []
-    # for positions in positions_list:
-    #     positions_tensor = torch.tensor(positions)
-    #     # Min-max normalization
-    #     min_val = positions_tensor.min(dim=0, keepdim=True)[0]
-    #     max_val = positions_tensor.max(dim=0, keepdim=True)[0]
-    #     positions_normalized = (positions_tensor - min_val) / (max_val - min_val + 1e-7)  # Adding epsilon to avoid division by zero
-    #     # Scaling to range [-1, 1]
-    #     positions_normalized = 2*positions_normalized-1
-    #     normalized_positions_list.append(positions_normalized.numpy())
         
     normalized_positions_list = positions_list
 

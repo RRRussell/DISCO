@@ -8,7 +8,6 @@ def create_args():
     parser = argparse.ArgumentParser()
     # Model arguments
     parser.add_argument('--model', type=str, default='gaussian', choices=['flow', 'gaussian'])
-    # parser.add_argument('--input_dim', type=int, default=376)
     parser.add_argument('--position_dim', type=int, default=2)
     parser.add_argument('--encoded_position_dim', type=int, default=32)
     parser.add_argument('--latent_dim', type=int, default=32)
@@ -30,9 +29,6 @@ def create_args():
     parser.add_argument('--spectral_norm', type=eval, default=False, choices=[True, False])
 
     # Datasets and loaders
-    # parser.add_argument('--dataset_path', type=str, default='/home/zihend1/Diffusion/diffusion-point-cloud/data/shapenet.hdf5')
-    # parser.add_argument('--categories', type=str_list, default=['airplane'])
-    # parser.add_argument('--scale_mode', type=str, default='shape_unit')
     parser.add_argument('--train_batch_size', type=int, default=128)
     parser.add_argument('--val_batch_size', type=int, default=64)
 
@@ -46,9 +42,6 @@ def create_args():
     parser.add_argument('--train_epochs', type=int, default=100)
 
     # Training
-    # parser.add_argument('--seed', type=int, default=2020)
-    # parser.add_argument('--logging', type=eval, default=True, choices=[True, False])
-    # parser.add_argument('--log_root', type=str, default='./logs_gen')
     parser.add_argument('--device', type=str, default='cuda')
     # parser.add_argument('--max_iters', type=int, default=float('inf'))
     # parser.add_argument('--val_freq', type=int, default=1000)
