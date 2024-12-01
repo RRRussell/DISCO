@@ -19,7 +19,7 @@ class Baseline:
     def fill_region(self):
         raise NotImplementedError("Subclasses should implement this method")
 
-class RandomRegion(Baseline):
+class RandomRegion(Baseline): 
     def __init__(self, gene_expression_dim=374, position_dim=2, max_attempts=1000):
         self.gene_expression_dim = gene_expression_dim
         self.position_dim = position_dim
@@ -30,6 +30,8 @@ class RandomRegion(Baseline):
         slice_obs_df['center_x'] = slice_obs_df['center_x'].astype(float)
         slice_obs_df['center_y'] = slice_obs_df['center_y'].astype(float)
         
+        best_candidate = None
+        best_candidate_size = 0
         valid_cells = False
         attempts = 0
         
@@ -52,11 +54,20 @@ class RandomRegion(Baseline):
             if len(filled_cells) >= num_cells:
                 filled_cells = filled_cells.sample(n=num_cells, replace=False)
                 valid_cells = True
+            else:
+                # Update the best candidate if this region has more cells
+                if len(filled_cells) > best_candidate_size:
+                    best_candidate = filled_cells
+                    best_candidate_size = len(filled_cells)
 
             attempts += 1
 
+        # If no valid region is found, use the best candidate
         if not valid_cells:
-            raise ValueError("Failed to find a valid region with at least 50 cells after 100 attempts.")
+            if best_candidate is None:
+                raise ValueError("Failed to find any region with cells after {} attempts.".format(self.max_attempts))
+            filled_cells = best_candidate
+            print(f"Warning: Using best candidate with {best_candidate_size} cells instead of {num_cells} cells.")
 
         filled_gene_expressions = adata[filled_cells.index].X
 
@@ -82,8 +93,11 @@ class TissueSpecificRandomRegion(Baseline):
         if len(tissue_cells) < num_cells:
             raise ValueError("Not enough cells of the dominant tissue to form a valid region.")
 
+        best_candidate = None
+        best_candidate_size = 0
         valid_cells = False
         attempts = 0
+
         while not valid_cells and attempts < self.max_attempts:
             random_cell = tissue_cells.sample(1)
             center_x = random_cell['center_x'].values[0]
@@ -106,10 +120,19 @@ class TissueSpecificRandomRegion(Baseline):
             if len(possible_cells) >= num_cells:
                 sampled_cells = possible_cells.sample(n=num_cells, replace=False)
                 valid_cells = True
+            else:
+                # Update the best candidate if this region has more cells
+                if len(possible_cells) > best_candidate_size:
+                    best_candidate = possible_cells
+                    best_candidate_size = len(possible_cells)
+
             attempts += 1
 
         if not valid_cells:
-            raise ValueError("Failed to find a valid region with at least 50 dominant tissue cells after 100 attempts.")
+            if best_candidate is None:
+                raise ValueError("Failed to find any region with cells after {} attempts.".format(self.max_attempts))
+            sampled_cells = best_candidate
+            print(f"Warning: Using best candidate with {best_candidate_size} cells instead of {num_cells} cells.")
 
         filled_gene_expressions = adata[sampled_cells.index].X
 
