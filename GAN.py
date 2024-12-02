@@ -11,7 +11,6 @@ class Generator(nn.Module):
             nn.Linear(128, 128),
             nn.ReLU(),
             nn.Linear(128, output_dim)
-            # nn.Sigmoid()
         )
 
     def forward(self, x):

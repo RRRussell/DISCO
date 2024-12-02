@@ -15,6 +15,7 @@ from scipy.stats import truncnorm
 from sklearn.neighbors import NearestNeighbors
 
 import torch
+import torch.nn.functional as F
 
 def seed_everything(seed=2024):
     random.seed(seed)    # Python random module
@@ -135,11 +136,41 @@ def map_position_back(predicted_positions, test_area):
 
     
 # Define Chamfer Loss for unordered data
-def chamfer_loss(predictions, targets):
+def chamfer_loss(targets, predictions):
     pred_to_target_dist = torch.cdist(predictions, targets, p=2)
     target_to_pred_dist = torch.cdist(targets, predictions, p=2)
     loss = torch.mean(pred_to_target_dist.min(dim=1)[0]) + torch.mean(target_to_pred_dist.min(dim=1)[0])
     return loss
+
+def compute_unordered_gene_expression_loss(true_positions, true_expressions, pred_positions, pred_expressions):
+    """
+    Compute the gene expression loss using nearest neighbor alignment and MSE.
+
+    Args:
+    - true_positions (torch.Tensor): Ground truth cell coordinates, shape [batch_size, num_cells, 2].
+    - true_expressions (torch.Tensor): Ground truth gene expression values, shape [batch_size, num_cells, num_genes].
+    - pred_positions (torch.Tensor): Predicted cell coordinates, shape [batch_size, num_cells, 2].
+    - pred_expressions (torch.Tensor): Predicted gene expression values, shape [batch_size, num_cells, num_genes].
+
+    Returns:
+    - expression_loss (torch.Tensor): Mean squared error (MSE) loss for gene expression alignment.
+    """
+    # Compute pairwise Euclidean distance between predicted and true positions
+    dist_matrix = torch.cdist(pred_positions, true_positions, p=2)
+    
+    # Find the indices of the closest true positions for each predicted position
+    closest_indices = dist_matrix.argmin(dim=2)
+    
+    # Gather the gene expression values of the closest true neighbors
+    closest_true_expressions = true_expressions.gather(
+        1, closest_indices.unsqueeze(-1).expand(-1, -1, true_expressions.size(2))
+    )
+    
+    # Compute MSE between predicted and closest true gene expressions
+    expression_loss = F.mse_loss(pred_expressions, closest_true_expressions, reduction='mean')
+    
+    return expression_loss
+
 
 def visualize_test_region(slice_obs_df, test_area, title='', new_coords=None):
     slice_obs_df['fov'] = slice_obs_df['fov'].astype(int)

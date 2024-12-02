@@ -174,7 +174,7 @@ def generate_training_samples(platform: str = "MERFISH", dataset: str = "MouseBr
                         slice_obs.loc[selected_index, 'normalized_y'] = 2 * ((slice_obs.loc[selected_index, 'center_y'] - hole_min_y) / (hole_max_y - hole_min_y)) - 1
                         
                         dominant_tissue = slice_obs.loc[selected_index, 'tissue'].value_counts().idxmax()
-                        if dominant_tissue in ['brain ventricle', 'olfactory region']:
+                        if dominant_tissue in ['brain ventricle', 'olfactory region', 'pia mater']:
                             continue
                         dominant_ratio = slice_obs.loc[selected_index, 'tissue'].value_counts(normalize=True)[dominant_tissue]
 
