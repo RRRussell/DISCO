@@ -40,6 +40,41 @@ def generate_edges(positions, k=5):
     edge_index = torch.tensor(edge_index, dtype=torch.long).t().contiguous()
     return edge_index
 
+def select_central_cells(predicted_positions, expansion_factor=1):
+    """
+    Select a certain fraction of cells around the center of predicted_positions based on distances.
+    Also return a central_mask to indicate which cells are selected.
+
+    Args:
+        predicted_positions: (N, d) predicted coordinates for a single batch.
+        expansion_factor: int, expansion factor to define fraction of cells to pick.
+    
+    Returns:
+        central_positions: (M, d) subset of positions considered 'central'.
+        central_mask: (N,) boolean mask indicating which cells are selected as central.
+    """
+    N = predicted_positions.size(0)
+    # Compute the center (mean) of predicted positions
+    center = predicted_positions.mean(dim=0, keepdim=True)  # (1, d)
+    
+    # Compute distances of each cell to the center
+    distances = torch.norm(predicted_positions - center, dim=1)  # (N,)
+    
+    # fraction to select: 1 / ((2*expansion_factor + 1)^2)
+    fraction = 1.0 / ((2 * expansion_factor + 1) ** 2)
+    num_to_select = max(int(fraction * N), 1)  # at least select 1 cell
+    
+    # Sort by distance and select top fraction
+    sorted_indices = torch.argsort(distances)  # ascending order
+    central_indices = sorted_indices[:num_to_select]
+
+    central_positions = predicted_positions[central_indices]
+
+    central_mask = torch.zeros(N, dtype=torch.bool, device=predicted_positions.device)
+    central_mask[central_indices] = True
+
+    return central_positions, central_mask
+    
 def extract_cells_from_expanded_region(test_item, expansion_factor=1):
     """
     Extract positions and gene expressions from the expanded region in test_item.adata.
@@ -120,20 +155,33 @@ def normalize_positions_within_expanded_test_area(positions, test_area, expansio
     normalized_positions[:, 1] = 2 * (positions[:, 1] - min_y) / (max_y - min_y) - 1
     return normalized_positions
 
-def map_position_back(predicted_positions, test_area):
+def map_position_back(predicted_positions, test_area, expansion_factor=None):
     """
     Map predicted positions back to the original coordinate range.
     Args:
         predicted_positions: (B, N, pos_dim) Predicted positions in normalized space
         test_area: An object containing the original coordinate ranges
+        expansion_factor: Scaling factor that affects the normalized position range
     Returns:
         predicted_positions: (B, N, pos_dim) Predicted positions in original space
     """
-    predicted_positions = (predicted_positions + 1) / 2.0
+    if expansion_factor is not None:
+        # Calculate the normalization range
+        norm_min = -1 / (2 * expansion_factor + 1)
+        norm_max = 1 / (2 * expansion_factor + 1)
+
+        # Rescale predicted_positions from [norm_min, norm_max] to [0, 1]
+        predicted_positions = (predicted_positions - norm_min) / (norm_max - norm_min)
+
+    else:
+        # Default normalization from [-1, 1] to [0, 1]
+        predicted_positions = (predicted_positions + 1) / 2.0
+
+    # Map to the original test_area coordinate range
     predicted_positions[:, 0] = predicted_positions[:, 0] * (test_area.hole_max_x - test_area.hole_min_x) + test_area.hole_min_x
     predicted_positions[:, 1] = predicted_positions[:, 1] * (test_area.hole_max_y - test_area.hole_min_y) + test_area.hole_min_y
-    return predicted_positions
 
+    return predicted_positions
     
 # Define Chamfer Loss for unordered data
 def chamfer_loss(targets, predictions):
@@ -431,7 +479,7 @@ def visualize_sampling_process_animation(model, num_points=500, point_dim=2, fle
     z = torch.randn(1, model.args.latent_dim).to(model.args.device)
     tissue_embed = model.tissue_embedding(torch.tensor([0], device=model.args.device))  # (B, tissue_dim)
     z_with_tissue = torch.cat([z, tissue_embed], dim=-1)  # (B, F + tissue_dim)
-    traj = model.position_diffusion.sample(num_points=500, 
+    traj = model.position_diffusion.sample(num_points=num_points, 
                                            context=z_with_tissue, 
                                            point_dim=point_dim, 
                                            flexibility=flexibility, 

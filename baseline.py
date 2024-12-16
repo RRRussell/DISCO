@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.nn.utils import clip_grad_norm_
 
-from utils import chamfer_loss, compute_unordered_gene_expression_loss
+from utils import chamfer_loss, compute_unordered_gene_expression_loss, normalize_positions
 from GAN import Generator, Discriminator
 
 class Baseline:
@@ -288,7 +288,7 @@ class VariationalAutoencoder(nn.Module):
         
         # # Normalize the position outputs to be between 0 and 1
         # decoded[:, :, :2] = (torch.tanh(decoded[:, :, :2]) + 1) / 2
-        decoded[:, :, :2] = 2*torch.sigmoid(decoded[:, :, :2])-1
+        # decoded[:, :, :2] = 2*torch.sigmoid(decoded[:, :, :2])-1
 
         return decoded, mu, logvar
 
@@ -302,6 +302,7 @@ class VariationalAutoencoder(nn.Module):
         expression_loss = compute_unordered_gene_expression_loss(true_positions, true_expressions, pred_positions, pred_expressions)
         kl_divergence = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
         total_loss = position_loss + expression_loss + kl_divergence
+        # total_loss = position_loss + kl_divergence
         return total_loss, position_loss, expression_loss, kl_divergence
 
 # Define the VAE Baseline Class
@@ -313,7 +314,7 @@ class VAE(Baseline):
         self.device = device
         self.model.to(self.device)
 
-    def train_model(self, dataloader, epochs=50, max_grad_norm=1.0):
+    def train_model(self, dataloader, epochs=500, max_grad_norm=1.0):
         optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
         self.model.train()
@@ -331,7 +332,7 @@ class VAE(Baseline):
                 optimizer.step()
                 scheduler.step()
                 total_loss += loss.item()
-                # print(f"Position Loss: {pos_loss.item()}, Expression Loss: {expr_loss.item()}, KL Divergence: {kl_div.item()}")
+                print(f"Position Loss: {pos_loss.item()}, Expression Loss: {expr_loss.item()}, KL Divergence: {kl_div.item()}")
             print(f"Epoch {epoch + 1}, Average Loss: {total_loss / len(dataloader):.4f}")
 
     def fill_region(self, adata, test_area, num_cells=50):
@@ -344,7 +345,9 @@ class VAE(Baseline):
 
             # # Normalize the decoded position outputs to be between 0 and 1
             # decoded[:, :2] = (torch.tanh(decoded[:, :2]) + 1) / 2
-            decoded[:, :2] = 2*torch.sigmoid(decoded[:, :2])-1
+            # decoded[:, :2] = 2*torch.sigmoid(decoded[:, :2])-1
+    
+            decoded[:, :2] = normalize_positions(decoded[:, :2])
 
             predicted_positions = decoded[:, :2].cpu().numpy()
             predicted_expressions = decoded[:, 2:].cpu().numpy()
@@ -395,7 +398,7 @@ class GANBaseline(Baseline):
                 real_outputs = self.discriminator(train_data)
                 noise = torch.randn(train_data.size(0), train_data.size(1), train_data.size(2)).to(self.device)
                 fake_data = self.generator(noise)
-                fake_data[:, :, :2] = 2*torch.sigmoid(fake_data[:, :, :2])-1
+                # fake_data[:, :, :2] = 2*torch.sigmoid(fake_data[:, :, :2])-1
                 fake_outputs = self.discriminator(fake_data)
 
                 d_loss_real = criterion(real_outputs, real_labels)
@@ -409,7 +412,7 @@ class GANBaseline(Baseline):
                 optimizer_g.zero_grad()
                 # Regenerate fake data
                 fake_data = self.generator(noise)
-                fake_data[:, :, :2] = 2*torch.sigmoid(fake_data[:, :, :2])-1
+                # fake_data[:, :, :2] = 2*torch.sigmoid(fake_data[:, :, :2])-1
                 fake_outputs = self.discriminator(fake_data)
                 # Calculate generator loss
                 g_loss_adv = criterion(fake_outputs, real_labels)  # Adversarial loss
@@ -438,7 +441,8 @@ class GANBaseline(Baseline):
         noise = torch.randn(self.num_cells, self.output_channel).to(self.device)
         generated_data = self.generator(noise)
         # Apply sigmoid to coordinates
-        generated_data[:, :2] = 2*torch.sigmoid(generated_data[:, :2])-1
+        # generated_data[:, :2] = 2*torch.sigmoid(generated_data[:, :2])-1
+        generated_data[:, :2] = normalize_positions(generated_data[:, :2])
         generated_data = generated_data.detach().cpu().squeeze(0).squeeze(0)
 
         coordinates = generated_data[:, :2]
@@ -542,7 +546,7 @@ class LatentSpaceGAN(Baseline):
 
                 # Ensure decoded positions are in the correct range
                 # decoded_positions = (torch.tanh(decoded_positions) + 1) / 2
-                decoded_positions = 2*torch.sigmoid(decoded_positions[:, :, :2])-1
+                # decoded_positions = 2*torch.sigmoid(decoded_positions[:, :, :2])-1
 
                 # Compute position loss
                 g_loss_position = chamfer_loss(positions, decoded_positions)
@@ -577,7 +581,8 @@ class LatentSpaceGAN(Baseline):
 
             # Ensure decoded positions are in the correct range
             # decoded_positions = (torch.tanh(decoded_positions) + 1) / 2
-            decoded_positions = 2*torch.sigmoid(decoded_positions[:, :2])-1
+            # decoded_positions = 2*torch.sigmoid(decoded_positions[:, :2])-1
+            decoded_positions = normalize_positions(decoded_positions)
 
             predicted_positions = decoded_positions.cpu().numpy()
             predicted_expressions = decoded_expressions.cpu().numpy()

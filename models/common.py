@@ -51,6 +51,66 @@ class ConcatSquashLinear(Module):
         ret = self._layer(x) * gate + bias
         return ret
 
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv, SAGEConv, GATConv, TransformerConv
+
+class ConcatSquashGNN(nn.Module):
+    def __init__(self, input_dim, output_dim, ctx_dim, gnn_type="gcn", hidden_dim=128, heads=1, dropout=0.0, negative_slope=0.2):
+        super().__init__()
+        # _hyper_gate and _hyper_bias produce gate and bias from ctx
+        self._hyper_gate = nn.Linear(ctx_dim, output_dim)
+        self._hyper_bias = nn.Linear(ctx_dim, output_dim, bias=False)
+
+        # Build GNN layers depending on gnn_type
+        self.gnn_type = gnn_type.lower().strip()
+        self.negative_slope = negative_slope
+        self.dropout = dropout
+        self.act = F.leaky_relu
+
+        # First conv
+        self.conv1 = self._build_conv(self.gnn_type, input_dim, hidden_dim, heads)
+        # Second conv
+        self.conv2 = self._build_conv(self.gnn_type, hidden_dim * (heads if self.gnn_type=="gat" or self.gnn_type=="transformer" else 1), output_dim, heads)
+
+    def _build_conv(self, gnn_type, in_dim, out_dim, heads):
+        """
+        Build a graph convolution layer based on gnn_type.
+        Adjust parameters as needed for each GNN variant.
+        """
+        if gnn_type == "gcn":
+            # GCNConv(in_channels, out_channels, ...)
+            return GCNConv(in_dim, out_dim)
+        elif gnn_type == "sage":
+            # SAGEConv(in_channels, out_channels, ...)
+            return SAGEConv(in_dim, out_dim)
+        elif gnn_type == "gat":
+            # GATConv(in_channels, out_channels, heads=heads, concat=True by default)
+            # out_dim is the per-head dimension, total output dim = out_dim * heads
+            return GATConv(in_dim, out_dim, heads=heads, dropout=self.dropout)
+        elif gnn_type == "transformer":
+            # TransformerConv(in_channels, out_channels, heads=heads, ...)
+            # Similar to GAT, output is out_dim * heads if concat=True.
+            return TransformerConv(in_dim, out_dim, heads=heads, dropout=self.dropout, beta=False)
+        else:
+            raise ValueError(f"Unsupported gnn_type: {gnn_type}")
+        
+    def forward(self, x, edge_index, ctx, batch=None):
+        # x: (N, input_dim)
+        # ctx: (N, ctx_dim)
+        # edge_index: (2, E)
+        # batch: (N,) optional, if needed for pooling (not mandatory for GCNConv itself)
+
+        # Compute gate and bias
+        gate = torch.sigmoid(self._hyper_gate(ctx))  # (N, output_dim)
+        bias = self._hyper_bias(ctx)                 # (N, output_dim)
+
+        x_out = self.act(self.conv1(x, edge_index), negative_slope=self.negative_slope)
+        if self.dropout > 0.0:
+            x_out = F.dropout(x_out, p=self.dropout, training=self.training)
+        x_out = self.conv2(x_out, edge_index)  # (N, output_dim)
+
+        ret = x_out * gate + bias
+        return ret
 
 def get_linear_scheduler(optimizer, start_epoch, end_epoch, start_lr, end_lr):
     def lr_func(epoch):

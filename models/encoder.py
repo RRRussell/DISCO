@@ -50,6 +50,7 @@ class GNNEncoder(nn.Module):
 class SineCosinePositionalEncoding(nn.Module):
     def __init__(self, zdim):
         super().__init__()
+        assert zdim % 4 == 0, "zdim must be a multiple of 4 for 2D positional encoding."
         self.zdim = zdim
 
     def forward(self, coords):
@@ -60,8 +61,12 @@ class SineCosinePositionalEncoding(nn.Module):
             pos_encoding: Tensor of shape (batch_size, num_points, zdim)
         """
         pe = torch.zeros(coords.size(0), coords.size(1), self.zdim, device=coords.device)
-        position = coords.unsqueeze(-1)
-        div_term = torch.exp(torch.arange(0, self.zdim, 2, device=coords.device) * -(torch.log(torch.tensor(10000.0)) / self.zdim))
-        pe[:, :, 0::2] = torch.sin(position[:, :, 0] * div_term)
-        pe[:, :, 1::2] = torch.cos(position[:, :, 0] * div_term)
+        position = coords.unsqueeze(-1)  # (batch_size, num_points, 2, 1)
+        div_term = torch.exp(
+            torch.arange(0, self.zdim // 2, 2, device=coords.device) * -(torch.log(torch.tensor(10000.0)) / (self.zdim // 2))
+        )
+        pe[:, :, 0::4] = torch.sin(position[:, :, 0] * div_term)  # Sine for x-coordinate
+        pe[:, :, 1::4] = torch.cos(position[:, :, 0] * div_term)  # Cosine for x-coordinate
+        pe[:, :, 2::4] = torch.sin(position[:, :, 1] * div_term)  # Sine for y-coordinate
+        pe[:, :, 3::4] = torch.cos(position[:, :, 1] * div_term)  # Cosine for y-coordinate
         return pe

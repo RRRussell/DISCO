@@ -32,12 +32,10 @@ class GaussianVAE(Module):
 
         # Diffusion model for generating or reconstructing positions
         self.position_diffusion = DiffusionModel(
-            net=PositionDenoiseNet(
-                position_dim=args.position_dim,  # Point dimension = pos_dim
+            net=GNNDenoiseNet(
+                input_dim=args.position_dim, 
                 latent_dim=args.latent_dim,
-                context_dim=args.latent_dim + args.tissue_dim,  # Context dimension = latent_dim + tissue_dim
-                residual=args.residual,
-                batch_context=True
+                context_dim=args.latent_dim + args.tissue_dim  # Context dimension = latent_dim + tissue_dim
             ),
             var_sched=VarianceSchedule(
                 num_steps=args.num_steps,
@@ -49,12 +47,10 @@ class GaussianVAE(Module):
 
         # Diffusion model for generating or reconstructing gene expressions
         self.expression_diffusion = DiffusionModel(
-            net=ExpressionDenoiseNet(
-                expression_dim=args.expression_dim,  # Point dimension = expr_dim
+            net=GNNDenoiseNet(
+                input_dim=args.expression_dim,
                 latent_dim=args.latent_dim,
-                context_dim=args.latent_dim + args.tissue_dim + args.encoded_position_dim,  # Context dimension = latent_dim + tissue_dim + encoded_pos_dim
-                residual=args.residual,
-                batch_context=False
+                context_dim=args.latent_dim + args.tissue_dim + args.encoded_position_dim  # Context dimension = latent_dim + tissue_dim + encoded_pos_dim
             ),
             var_sched=VarianceSchedule(
                 num_steps=args.num_steps,
@@ -108,7 +104,8 @@ class GaussianVAE(Module):
         position_loss = kl_weight * loss_prior + loss_recons
         return position_loss
 
-    def get_expression_loss(self, predicted_positions, real_positions, real_expressions, edge_index, tissue_labels):
+    # def get_expression_loss(self, predicted_positions, real_positions, real_expressions, edge_index, tissue_labels):
+    def get_expression_loss(self, real_positions, real_expressions, edge_index, tissue_labels):
         """
         Compute loss for gene expression prediction using the nearest real positions.
         Args:
@@ -122,15 +119,22 @@ class GaussianVAE(Module):
         """
         z_mu, z_sigma = self.encode_all(real_expressions, edge_index)
         z = reparameterize_gaussian(mean=z_mu, logvar=z_sigma)  # (B, latent_dim)
-        z_expand = z.unsqueeze(1).expand(-1, predicted_positions.size(1), -1)  # (B, N, latent_dim)
+        z_expand = z.unsqueeze(1).expand(-1, real_positions.size(1), -1)  # (B, N, latent_dim)
         # Get tissue embeddings and concatenate with predicted positions.
         tissue_embed = self.tissue_embedding(tissue_labels)  # (B, tissue_dim)
-        tissue_embed_expand = tissue_embed.unsqueeze(1).expand(-1, predicted_positions.size(1), -1)  # (B, N, tissue_dim)
-        encoded_positions = self.position_encoder(predicted_positions)  # (B, N, encoded_pos_dim)
+        tissue_embed_expand = tissue_embed.unsqueeze(1).expand(-1, real_positions.size(1), -1)  # (B, N, tissue_dim)
+        encoded_positions = self.position_encoder(real_positions)  # (B, N, encoded_pos_dim)
         context = torch.cat([z_expand, tissue_embed_expand, encoded_positions], dim=-1)  # (B, N, latent_dim + tissue_dim + encoded_pos_dim)
         # Find nearest real positions for each predicted position.
-        nearest_expressions = self.get_nearest_expressions(predicted_positions, real_positions, real_expressions)
-        loss_recons = self.expression_diffusion.get_loss(nearest_expressions, context)
+        
+        # print("train gene: predicted_positions:", predicted_positions.min(), predicted_positions.max(), predicted_positions.shape,
+        #                     "real_positions:", real_positions.min(), real_positions.max(), real_positions.shape)
+        
+        # nearest_expressions = self.get_nearest_expressions(predicted_positions, real_positions, real_expressions)
+        nearest_expressions = real_expressions
+        # loss_recons = self.expression_diffusion.get_loss(nearest_expressions, context, mode="expression", position=predicted_positions, k=5, batch_context=False)
+        loss_recons = self.expression_diffusion.get_loss(nearest_expressions, context, mode="expression", position=real_positions, k=5, batch_context=False)
+        
         return loss_recons
 
     def get_nearest_expressions(self, predicted_positions, real_positions, real_expressions):
@@ -183,26 +187,38 @@ class GaussianVAE(Module):
 
         # If we are using the neighborhood information (test_item_list is not None)
         if test_item_list is not None:
-            central_region_min = -1 / (2 * expansion_factor + 1)
-            central_region_max = 1 / (2 * expansion_factor + 1)
+            # central_region_min = -1 / (2 * expansion_factor + 1)
+            # central_region_max = 1 / (2 * expansion_factor + 1)
             selected_positions = []
 
             for i, test_item in enumerate(test_item_list):
                 # Normalize the predicted positions
                 samples_normalized = normalize_positions(samples[i])
+                
+                central_positions, _ = select_central_cells(samples_normalized, expansion_factor=expansion_factor)
 
                 # Identify the cells in the central region
-                central_mask = (samples_normalized[:, 0] > central_region_min) & (samples_normalized[:, 0] < central_region_max) & \
-                            (samples_normalized[:, 1] > central_region_min) & (samples_normalized[:, 1] < central_region_max)
+                # central_mask = (samples_normalized[:, 0] > central_region_min) & (samples_normalized[:, 0] < central_region_max) & \
+                #             (samples_normalized[:, 1] > central_region_min) & (samples_normalized[:, 1] < central_region_max)
 
-                central_positions = samples[i][central_mask]  # Get positions inside the central region
+                # central_positions = samples[i][central_mask]  # Get positions inside the central region
 
-                # If more than 50 positions are in the central region, randomly sample 50 positions
-                if central_positions.shape[0] > 50:
-                    selected_indices = torch.randperm(central_positions.shape[0])[:50]  # Randomly select 50 indices
-                    central_positions = central_positions[selected_indices]
+                # # If more than 50 positions are in the central region, randomly sample 50 positions
+                # if central_positions.shape[0] > 50:
+                #     selected_indices = torch.randperm(central_positions.shape[0])[:50]  # Randomly select 50 indices
+                #     central_positions = central_positions[selected_indices]
+                # # If fewer than 50 positions are in the central region, repeat selection until 50 positions
+                # elif central_positions.shape[0] < 50:
+                #     num_to_add = 50 - central_positions.shape[0]  # Number of additional positions needed
+                #     if central_positions.shape[0] > 0:
+                #         additional_indices = torch.randint(0, central_positions.shape[0], (num_to_add,))
+                #         additional_positions = central_positions[additional_indices]
+                #         central_positions = torch.cat([central_positions, additional_positions], dim=0)
+                #     else:
+                #         # Handle edge case where no positions exist in the central region
+                #         raise ValueError("No positions found in the central region for test_item {}".format(i))
 
-                selected_positions.append(central_positions)
+                selected_positions.append(normalize_positions(central_positions))
 
             # Convert list of selected positions back to a tensor
             selected_positions = torch.stack(selected_positions, dim=0)
@@ -219,24 +235,87 @@ class GaussianVAE(Module):
             samples = samples * 2 - 1
             return samples
     
-    def sample_expressions(self, z, tissue_labels, predicted_positions, flexibility=0.0, truncate_std=None):
+    def sample_expressions(self, z, tissue_labels, predicted_positions, flexibility=0.0, truncate_std=None, expansion_factor=1, test_item_list=None, mode="expression"):
         """
         Sample gene expressions using the expression diffusion model.
         Args:
+            z: (B, latent_dim) Input latent variables, normal random samples with mean=0 std=1
             predicted_positions: (B, N, pos_dim) Predicted point clouds
             tissue_labels: (B,) Tensor of tissue labels
-        Returns:
+            Returns:
             gene_expressions: (B, N, expr_dim) Sampled gene expressions
         """
         num_points = predicted_positions.shape[1]
+
+        # Truncate latent variables if specified
         if truncate_std is not None:
             z = truncated_normal_(z, mean=0, std=1, trunc_std=truncate_std)
+
+        # Expand latent and tissue embeddings
         z_expand = z.unsqueeze(1).expand(-1, num_points, -1)  # (B, N, latent_dim)
         tissue_embed = self.tissue_embedding(tissue_labels)  # (B, tissue_dim)
-        tissue_embed_expand = tissue_embed.unsqueeze(1).expand(-1, predicted_positions.size(1), -1)  # (B, N, tissue_dim)
+        tissue_embed_expand = tissue_embed.unsqueeze(1).expand(-1, num_points, -1)  # (B, N, tissue_dim)
         encoded_positions = self.position_encoder(predicted_positions)  # (B, N, encoded_pos_dim)
+
+        # Concatenate latent, tissue, and position embeddings to form the context
         context = torch.cat([z_expand, tissue_embed_expand, encoded_positions], dim=-1)  # (B, N, latent_dim + tissue_dim + encoded_pos_dim)
-        gene_expressions = self.expression_diffusion.sample(num_points=num_points, context=context, point_dim=self.args.expression_dim, flexibility=flexibility)
+
+        # Sample expressions using the diffusion model
+        gene_expressions = self.expression_diffusion.sample(
+            num_points=num_points,
+            context=context,
+            point_dim=self.args.expression_dim,
+            flexibility=flexibility,
+            expansion_factor=expansion_factor,
+            test_item_list=test_item_list,
+            mode=mode,
+            position=predicted_positions  # Pass positions explicitly
+        )
+        
+        # print("s:", gene_expressions.shape)
+
+        # # If in test mode and neighborhood information is provided
+        # if test_item_list is not None:
+        #     # central_region_min = -1 / (2 * expansion_factor + 1)
+        #     # central_region_max = 1 / (2 * expansion_factor + 1)
+        #     selected_expressions = []
+
+        #     for i, test_item in enumerate(test_item_list):
+        #         # Normalize the predicted positions
+        #         positions_normalized = normalize_positions(predicted_positions[i])
+                
+        #         _, central_mask = self.select_central_cells(positions_normalized, expansion_factor=expansion_factor)
+
+        #         # # Identify the cells in the central region
+        #         # central_mask = (positions_normalized[:, 0] > central_region_min) & (positions_normalized[:, 0] < central_region_max) & \
+        #         #             (positions_normalized[:, 1] > central_region_min) & (positions_normalized[:, 1] < central_region_max)
+
+        #         central_expressions = gene_expressions[i][central_mask]  # Get expressions of cells in the central region
+
+        #         # # If more than 50 cells in the central region, randomly select 50
+        #         # if central_expressions.shape[0] > 50:
+        #         #     selected_indices = torch.randperm(central_expressions.shape[0])[:50]
+        #         #     central_expressions = central_expressions[selected_indices]
+        #         # # If fewer than 50 cells in the central region, repeat selection until 50
+        #         # elif central_expressions.shape[0] < 50:
+        #         #     num_to_add = 50 - central_expressions.shape[0]
+        #         #     if central_expressions.shape[0] > 0:
+        #         #         additional_indices = torch.randint(0, central_expressions.shape[0], (num_to_add,))
+        #         #         additional_expressions = central_expressions[additional_indices]
+        #         #         central_expressions = torch.cat([central_expressions, additional_expressions], dim=0)
+        #         #     else:
+        #         #         # Handle edge case where no cells exist in the central region
+        #         #         raise ValueError("No cells found in the central region for test_item {}".format(i))
+
+        #         selected_expressions.append(central_expressions)
+
+        #     # Convert list of selected expressions back to a tensor
+        #     selected_expressions = torch.stack(selected_expressions, dim=0)
+
+        #     return selected_expressions
+
+        # # If in train mode, return the full generated expressions
+        # else:
         return gene_expressions
 
     def sample(self, tissue_labels, num_points, flexibility=0.0):

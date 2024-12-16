@@ -3,6 +3,9 @@ import torch.nn.functional as F
 from torch.nn import Module, Parameter, ModuleList
 import numpy as np
 
+from torch_geometric.utils import to_undirected
+from torch_geometric.nn import knn_graph
+
 from models.common import *
 from utils import *
 
@@ -48,90 +51,25 @@ class VarianceSchedule(Module):
         sigmas = self.sigmas_flex[t] * flexibility + self.sigmas_inflex[t] * (1 - flexibility)
         return sigmas
 
-class PositionDenoiseNet(Module):
-
-    def __init__(self, position_dim, latent_dim, context_dim, residual, batch_context=True):
+class GNNDenoiseNet(Module):
+    def __init__(self, input_dim, latent_dim, context_dim, residual=True):
         super().__init__()
         self.act = F.leaky_relu
         self.residual = residual
-        self.batch_context = batch_context
+        # We no longer handle batch_context here. Assume ctx is always node-level.
+        # input_dim, latent_dim, context_dim+3 for time_emb dimension
         self.layers = ModuleList([
-            ConcatSquashLinear(position_dim, latent_dim, context_dim+3),
-            ConcatSquashLinear(latent_dim, position_dim, context_dim+3)
+            ConcatSquashGNN(input_dim, latent_dim, context_dim+3),
+            ConcatSquashGNN(latent_dim, input_dim, context_dim+3)
         ])
 
-    def forward(self, x, beta, context):
-        """
-        Args:
-            x:  Cell positions at some timestep t, (B, N, d).
-            beta:  Time step information, (B, ).
-            context:  Latents used as context, (B, F) or (B, N, F) depending on `batch_context`.
-        """
-        batch_size = x.size(0)
-        num_points = x.size(1)
-
-        beta = beta.view(batch_size, 1, 1)          # (B, 1, 1)
-        time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 1, 3)
-
-        if self.batch_context:
-            # Context is shared across the batch
-            context = context.view(batch_size, 1, -1)   # (B, 1, F)
-            ctx_emb = torch.cat([context, time_emb], dim=-1)    # (B, 1, F+3)
-            ctx_emb = ctx_emb.expand(-1, num_points, -1)  # (B, N, F+3)
-        else:
-            # Context is independent for each point
-            context = context.view(batch_size, num_points, -1)  # (B, N, F)
-            ctx_emb = torch.cat([context, time_emb.expand(-1, num_points, -1)], dim=-1)  # (B, N, F+3)
-
+    def forward(self, x, edge_index, ctx, batch=None):
+        # x: (N, d)
+        # ctx: (N, F+3), already includes time_emb and context merged outside
+        # edge_index: (2, E)
         out = x
         for i, layer in enumerate(self.layers):
-            out = layer(ctx=ctx_emb, x=out)
-            if i < len(self.layers) - 1:
-                out = self.act(out)
-
-        if self.residual:
-            return x + out
-        else:
-            return out
-
-class ExpressionDenoiseNet(Module):
-
-    def __init__(self, expression_dim, latent_dim, context_dim, residual, batch_context=True):
-        super().__init__()
-        self.act = F.leaky_relu
-        self.residual = residual
-        self.batch_context = batch_context
-        self.layers = ModuleList([
-            ConcatSquashLinear(expression_dim, latent_dim, context_dim+3),
-            ConcatSquashLinear(latent_dim, expression_dim, context_dim+3)
-        ])
-
-    def forward(self, x, beta, context):
-        """
-        Args:
-            x:  Cell positions at some timestep t, (B, N, d).
-            beta:  Time step information, (B, ).
-            context:  Latents used as context, (B, F) or (B, N, F) depending on `batch_context`.
-        """
-        batch_size = x.size(0)
-        num_points = x.size(1)
-
-        beta = beta.view(batch_size, 1, 1)          # (B, 1, 1)
-        time_emb = torch.cat([beta, torch.sin(beta), torch.cos(beta)], dim=-1)  # (B, 1, 3)
-
-        if self.batch_context:
-            # Context is shared across the batch
-            context = context.view(batch_size, 1, -1)   # (B, 1, F)
-            ctx_emb = torch.cat([context, time_emb], dim=-1)    # (B, 1, F+3)
-            ctx_emb = ctx_emb.expand(-1, num_points, -1)  # (B, N, F+3)
-        else:
-            # Context is independent for each point
-            context = context.view(batch_size, num_points, -1)  # (B, N, F)
-            ctx_emb = torch.cat([context, time_emb.expand(-1, num_points, -1)], dim=-1)  # (B, N, F+3)
-
-        out = x
-        for i, layer in enumerate(self.layers):
-            out = layer(ctx=ctx_emb, x=out)
+            out = layer(x=out, edge_index=edge_index, ctx=ctx, batch=batch)
             if i < len(self.layers) - 1:
                 out = self.act(out)
 
@@ -141,121 +79,166 @@ class ExpressionDenoiseNet(Module):
             return out
         
 class DiffusionModel(Module):
-
-    def __init__(self, net, var_sched:VarianceSchedule):
+    def __init__(self, net, var_sched):
         super().__init__()
         self.net = net
         self.var_sched = var_sched
 
-    def get_loss(self, x_0, context, t=None):
-        """
-        Args:
-            x_0: Input point, (B, N, d).
-            context: Latent, (B, F).
-        """
-        batch_size, _, point_dim = x_0.size()
-        if t == None:
-            t = self.var_sched.uniform_sample_t(batch_size)
+    def get_loss(self, x_0, context, t=None, mode="position", position=None, k=5, batch_context=True):
+        B, N, d = x_0.size()
+        device = x_0.device
+        if t is None:
+            t = self.var_sched.uniform_sample_t(B)
         alpha_bar = self.var_sched.alpha_bars[t]
         beta = self.var_sched.betas[t]
-
-        c0 = torch.sqrt(alpha_bar).view(-1, 1, 1)       # (B, 1, 1)
-        c1 = torch.sqrt(1 - alpha_bar).view(-1, 1, 1)   # (B, 1, 1)
+        c0 = torch.sqrt(alpha_bar).view(-1, 1, 1)
+        c1 = torch.sqrt(1 - alpha_bar).view(-1, 1, 1)
 
         e_rand = torch.randn_like(x_0)  # (B, N, d)
-        e_theta = self.net(c0 * x_0 + c1 * e_rand, beta=beta, context=context)
+        coord_for_graph = position if (position is not None and mode == "expression") else x_0
+        BN = B * N
+        x_flat = coord_for_graph.view(BN, 2)
+        batch = torch.repeat_interleave(torch.arange(B, device=device), N)
+        edge_index = knn_graph(x_flat, k=k, batch=batch)
 
-        loss = F.mse_loss(e_theta.view(-1, point_dim), e_rand.view(-1, point_dim), reduction='mean')
+        x_input = (c0 * x_0 + c1 * e_rand).view(BN, d)
+
+        if batch_context and context.dim() == 2:
+            context = context.unsqueeze(1).expand(B, N, -1)
+        context = context.reshape(BN, -1)
+
+        beta_node = beta.repeat_interleave(N)
+        time_emb = torch.cat([
+            beta_node.unsqueeze(-1),
+            torch.sin(beta_node).unsqueeze(-1),
+            torch.cos(beta_node).unsqueeze(-1)
+        ], dim=-1)  # (B*N, 3)
+
+        ctx = torch.cat([context, time_emb], dim=-1)  # (B*N, F+3)
+
+        e_theta = self.net(x=x_input, edge_index=edge_index, ctx=ctx, batch=batch)
+        loss = F.mse_loss(e_theta, e_rand.view(BN, d), reduction='mean')
         return loss
 
-    def sample(self, num_points, context, point_dim=2, flexibility=0.0, ret_traj=False, expansion_factor=1, test_item_list=None, mode="position"):
-        """
-        Sample from the diffusion model. Supports integrating known positions or gene expressions from test items.
-
-        Args:
-            num_points: Number of points to sample.
-            context: Latent context tensor.
-            point_dim: Dimensionality of the points.
-            flexibility: Flexibility in the sampling process.
-            ret_traj: If True, return the whole trajectory.
-            test_item_list: List of test items with ground truth data.
-            mode: Sampling mode - either "position" or "expression".
-        """
-        batch_size = context.size(0)
-        x_T = torch.randn([batch_size, num_points, point_dim]).to(context.device)
+    def sample(self, num_points, context, point_dim=2, flexibility=0.0, ret_traj=False, expansion_factor=1,
+               test_item_list=None, mode="position", position=None, k=5, batch_context=True):
+        device = context.device
+        B = context.size(0)
+        x_T = torch.randn(B, num_points, point_dim, device=device)
         traj = {self.var_sched.num_steps: x_T}
+
         for t in range(self.var_sched.num_steps, 0, -1):
             z = torch.randn_like(x_T) if t > 1 else torch.zeros_like(x_T)
             alpha = self.var_sched.alphas[t]
             alpha_bar = self.var_sched.alpha_bars[t]
             sigma = self.var_sched.get_sigmas(t, flexibility)
-
             c0 = 1.0 / torch.sqrt(alpha)
             c1 = (1 - alpha) / torch.sqrt(1 - alpha_bar)
 
             x_t = traj[t]
-            beta = self.var_sched.betas[[t]*batch_size]
-            e_theta = self.net(x_t, beta=beta, context=context)
-            x_next = c0 * (x_t - c1 * e_theta) + sigma * z
-            
-            # Integrate known positions or gene expressions
+            beta = self.var_sched.betas[[t]*B]  # (B,)
+            B, N, d = x_t.size()
+
+            coord_for_graph = position if (position is not None and mode == "expression") else x_t
+            BN = B * N
+            x_flat = coord_for_graph.view(BN, 2)
+            batch = torch.repeat_interleave(torch.arange(B, device=device), N)
+            edge_index = knn_graph(x_flat, k=k, batch=batch)
+
+            # Flatten x_t for net
+            x_input = x_t.view(BN, d)
+
+            if batch_context and context.dim() == 2:
+                context = context.unsqueeze(1).expand(B, N, -1)
+            ctx_flat = context.reshape(BN, -1)
+
+            beta_node = beta.repeat_interleave(N)
+            time_emb = torch.cat([
+                beta_node.unsqueeze(-1),
+                torch.sin(beta_node).unsqueeze(-1),
+                torch.cos(beta_node).unsqueeze(-1)
+            ], dim=-1)  # (B*N,3)
+
+            ctx = torch.cat([ctx_flat, time_emb], dim=-1)
+
+            e_theta = self.net(x=x_input, edge_index=edge_index, ctx=ctx, batch=batch)
+            x_next = c0 * (x_t.view(BN,d) - c1 * e_theta) + sigma * z.view(BN,d)
+            x_next = x_next.view(B, N, d)
+
             if test_item_list is not None:
-                x_next = self.integrate_known_data(x_next, test_item_list, t, expansion_factor, mode)
-            
-            traj[t-1] = x_next.detach()     # Stop gradient and save trajectory.
-            traj[t] = traj[t].cpu()         # Move previous output to CPU memory.
+                x_next = self.integrate_known_data(x_next, test_item_list, t, expansion_factor, mode, position=position)
+
+            traj[t-1] = x_next.detach()
+            traj[t] = traj[t].cpu()
             if not ret_traj:
                 del traj[t]
-        
-        if ret_traj:
-            return traj
-        else:
-            return traj[0]
 
-    def integrate_known_data(self, x_next, test_item_list, t, expansion_factor, mode="position"):
+        return traj if ret_traj else traj[0]
+
+    def integrate_known_data(self, x_next, test_item_list, t, expansion_factor, mode="position", position=None):
         """
         Integrate the known positions or gene expressions from the test area into the sampled positions.
 
         Args:
-            x_next: (B, expanded_num_points, pos_dim) Sampled positions at time t.
+            x_next: (B, expanded_num_points, dim) Sampled positions or expressions at time t.
             test_item_list: List of test items with ground truth data.
             t: Current time step in the diffusion process.
             mode: Integration mode - either "position" or "expression".
+            position: (B, expanded_num_points, 2) Optional positions for finding surrounding cells.
         """
-        central_region_min = -1 / (2 * expansion_factor + 1)
-        central_region_max = 1 / (2 * expansion_factor + 1)
+        # Use `position` if provided; otherwise, use `x_next` directly
+        coord = position if position is not None else x_next
+
+        # central_region_min = -1 / (2 * expansion_factor + 1)
+        # central_region_max = 1 / (2 * expansion_factor + 1)
         c0 = 1.0 / torch.sqrt(self.var_sched.alphas[t])
         c1 = (1 - self.var_sched.alphas[t]) / torch.sqrt(1 - self.var_sched.alpha_bars[t])
 
         for i, test_item in enumerate(test_item_list):
             # Extract the surrounding (real) cells from the expanded region
-            surrounding_real_positions, surrounding_real_gene_expressions = extract_cells_from_expanded_region(test_item, expansion_factor=expansion_factor)
+            surrounding_real_positions, surrounding_real_gene_expressions = extract_cells_from_expanded_region(
+                test_item, expansion_factor=expansion_factor
+            )
+            surrounding_real_gene_expressions = surrounding_real_gene_expressions.to(coord.device)
             num_surrounding_real_cells = surrounding_real_positions.shape[0]
-            normalized_surrounding_real_positions = normalize_positions_within_test_area(surrounding_real_positions, test_item.test_area).to(x_next.device)
-            x_next_normalized = normalize_positions(x_next[i])
-            central_mask = (x_next_normalized[:, 0] > central_region_min) & (x_next_normalized[:, 0] < central_region_max) & \
-                            (x_next_normalized[:, 1] > central_region_min) & (x_next_normalized[:, 1] < central_region_max)
+            normalized_surrounding_real_positions = normalize_positions_within_test_area(
+                surrounding_real_positions, test_item.test_area
+            ).to(coord.device)
+            normalized_surrounding_real_positions = normalize_positions(normalized_surrounding_real_positions)
+
+            # Use the provided `coord` for central mask computation
+            coord_normalized = normalize_positions(coord[i])
+            # central_mask = (coord_normalized[:, 0] > central_region_min) & (coord_normalized[:, 0] < central_region_max) & \
+            #             (coord_normalized[:, 1] > central_region_min) & (coord_normalized[:, 1] < central_region_max)
+            
+            central_positions, central_mask = select_central_cells(coord_normalized, expansion_factor=expansion_factor)
             predicted_outer_indices = (~central_mask).nonzero(as_tuple=True)[0]  # Indices of outer cells
             num_predicted_outer_cells = predicted_outer_indices.size(0)
-        
+
             if mode == "position":
-                # Compare the number of surrounding (real) cells and predicted outer cells
+                # Handle position integration
                 if num_surrounding_real_cells > num_predicted_outer_cells:
-                    # If more real surrounding cells, randomly select the same number of real cells
                     selected_surrounding_indices = torch.randperm(num_surrounding_real_cells)[:num_predicted_outer_cells]
-                    noise = torch.randn_like(normalized_surrounding_real_positions[selected_surrounding_indices]).to(x_next.device)
+                    noise = torch.randn_like(normalized_surrounding_real_positions[selected_surrounding_indices]).to(coord.device)
                     noisy_surrounding_real_positions = c0 * normalized_surrounding_real_positions[selected_surrounding_indices] + c1 * noise
                     x_next[i, predicted_outer_indices] = noisy_surrounding_real_positions
                 else:
-                    # If more predicted outer cells, randomly select the same number of predicted outer cells
                     selected_predicted_indices = torch.randperm(num_predicted_outer_cells)[:num_surrounding_real_cells]
-                    noise = torch.randn_like(normalized_surrounding_real_positions).to(x_next.device)
+                    noise = torch.randn_like(normalized_surrounding_real_positions).to(coord.device)
                     noisy_surrounding_real_positions = c0 * normalized_surrounding_real_positions + c1 * noise
                     x_next[i, predicted_outer_indices[selected_predicted_indices]] = noisy_surrounding_real_positions
 
             elif mode == "expression":
-                # Similar handling for gene expressions if needed
-                # Normalize and integrate gene expression data
-                pass
+                # Handle gene expression integration
+                if num_surrounding_real_cells > num_predicted_outer_cells:
+                    selected_surrounding_indices = torch.randperm(num_surrounding_real_cells)[:num_predicted_outer_cells]
+                    noise = torch.randn_like(surrounding_real_gene_expressions[selected_surrounding_indices]).to(coord.device)
+                    noisy_surrounding_real_expressions = c0 * surrounding_real_gene_expressions[selected_surrounding_indices] + c1 * noise
+                    x_next[i, predicted_outer_indices] = noisy_surrounding_real_expressions
+                else:
+                    selected_predicted_indices = torch.randperm(num_predicted_outer_cells)[:num_surrounding_real_cells]
+                    noise = torch.randn_like(surrounding_real_gene_expressions).to(coord.device)
+                    noisy_surrounding_real_expressions = c0 * surrounding_real_gene_expressions + c1 * noise
+                    x_next[i, predicted_outer_indices[selected_predicted_indices]] = noisy_surrounding_real_expressions
 
         return x_next
